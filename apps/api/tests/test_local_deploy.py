@@ -186,14 +186,14 @@ class LocalDeployApiTests(unittest.TestCase):
         live_config_path = self.base / "host/etc/streamterminal-relay-matrix/mediamtx.yml"
         self.assertTrue(live_config_path.exists())
         first_contents = live_config_path.read_text()
-        self.assertIn("rtmpAddress: :1936", first_contents)
+        self.assertIn("rtmpAddress: :1935", first_contents)
         self.assertIn("paths:", first_contents)
         self.assertIn("  live/main:", first_contents)
         self.assertIn("  live/backup:", first_contents)
 
         updated_config = RelayConfig.model_validate(DEFAULT_CONFIG.model_dump(mode="json"))
         updated_config.channel_name = "Rollback target"
-        updated_config.primary_input.url = "rtmp://localhost:1936/live/changed-main"
+        updated_config.primary_input.url = "rtmp://localhost:1935/live/changed-main"
         updated_config.output.url = "rtmp://example.invalid/live/changed-output"
         save_response = self.client.put("/api/config/draft", json=updated_config.model_dump(mode="json"))
         self.assertEqual(save_response.status_code, 200)
