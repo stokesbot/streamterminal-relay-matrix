@@ -65,7 +65,7 @@ export type ServiceAction =
   | "daemon-reload";
 
 export type ServiceName = "mediamtx" | "stream-failover-relay";
-export type DeploymentProfileId = "local-dev" | "staging-vm" | "production-vm";
+export type DeploymentProfileId = string;
 
 export type ServiceActionResult = {
   ok: boolean;
@@ -97,6 +97,20 @@ export type GeneratedArtifact = {
 
 export type DeploymentProfile = {
   id: DeploymentProfileId;
+  label: string;
+  description: string;
+  run_on: "local" | "remote";
+  target_host: string;
+  target_user: string;
+  path_roots: Record<string, string>;
+  notes: string[];
+  secret_placeholders: string[];
+  source: "builtin" | "saved";
+  editable: boolean;
+};
+
+export type SavedDeploymentProfileRequest = {
+  id?: string;
   label: string;
   description: string;
   run_on: "local" | "remote";
@@ -142,6 +156,33 @@ export type DeploymentPlan = {
   }>;
   secret_templates: DeploymentSecretTemplate[];
   warnings: string[];
+};
+
+export type DeploymentAudit = {
+  profile: DeploymentProfile;
+  generated_at: string;
+  latest_revision?: {
+    version: number;
+    status: string;
+    created_at: string;
+    note: string;
+  } | null;
+  compared_bundle?: string | null;
+  summary: {
+    total_files: number;
+    changed_files: number;
+    unchanged_files: number;
+    new_files: number;
+  };
+  files: Array<{
+    name: string;
+    target_path: string;
+    bytes: number;
+    sha256: string;
+    previous_sha256?: string | null;
+    changed: boolean;
+    status: "new" | "changed" | "unchanged";
+  }>;
 };
 
 export type DeployExecuteResponse = {
@@ -210,7 +251,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
     try {
       const payload = (await response.json()) as { detail?: unknown };
       if (payload?.detail) {
-        detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail);
+        detail =
+          typeof payload.detail === "string"
+            ? payload.detail
+            : JSON.stringify(payload.detail);
       }
     } catch {
       // ignore body parse errors

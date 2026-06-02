@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -9,6 +10,9 @@ from typing import Any
 
 from .schemas import (
     DeployExecuteResponse,
+    DeploymentAuditFile,
+    DeploymentAuditResponse,
+    DeploymentAuditSummary,
     DeploymentCommand,
     DeploymentExecutionStep,
     DeploymentPlanResponse,
@@ -149,7 +153,15 @@ class RuntimeAdapter:
             "WantedBy=multi-user.target\n"
         )
 
-    def preview_artifacts(self, config: RelayConfig, *, config_dir: str | None = None, bin_dir: str | None = None, systemd_dir: str | None = None, root: Path | None = None) -> list[GeneratedArtifact]:
+    def preview_artifacts(
+        self,
+        config: RelayConfig,
+        *,
+        config_dir: str | None = None,
+        bin_dir: str | None = None,
+        systemd_dir: str | None = None,
+        root: Path | None = None,
+    ) -> list[GeneratedArtifact]:
         root = root or self.runtime_dir
         config_dir = config_dir or "/etc/streamterminal-relay-matrix"
         bin_dir = bin_dir or "/usr/local/bin"
@@ -185,21 +197,15 @@ class RuntimeAdapter:
 
     def write_runtime_artifacts(self, config: RelayConfig) -> list[GeneratedArtifact]:
         artifacts = self.preview_artifacts(config)
-
         for artifact in artifacts:
             path = Path(artifact.path)
             path.write_text(artifact.content)
             if path.suffix == ".sh":
                 path.chmod(0o755)
-
         return artifacts
 
     def install_artifacts(self, config: RelayConfig) -> list[GeneratedArtifact]:
         self.write_runtime_artifacts(config)
-
-        config_dir = "/etc/streamterminal-relay-matrix"
-        bin_dir = "/usr/local/bin"
-        systemd_dir = "/etc/systemd/system"
 
         installed = [
             GeneratedArtifact(
@@ -220,12 +226,12 @@ class RuntimeAdapter:
             GeneratedArtifact(
                 name="mediamtx.service",
                 path=str(self.install_root / "etc/systemd/system/mediamtx.service"),
-                content=self.mediamtx_service(config, config_dir),
+                content=self.mediamtx_service(config, "/etc/streamterminal-relay-matrix"),
             ),
             GeneratedArtifact(
                 name="stream-failover-relay.service",
                 path=str(self.install_root / "etc/systemd/system/stream-failover-relay.service"),
-                content=self.relay_service(config, config_dir, bin_dir),
+                content=self.relay_service(config, "/etc/streamterminal-relay-matrix", "/usr/local/bin"),
             ),
         ]
 
@@ -235,11 +241,10 @@ class RuntimeAdapter:
             path.write_text(artifact.content)
             if path.suffix == ".sh":
                 path.chmod(0o755)
-
         return installed
 
-    def deployment_profiles(self) -> list[DeploymentProfile]:
-        return [
+    def deployment_profiles(self, custom_profiles: list[DeploymentProfile] | None = None) -> list[DeploymentProfile]:
+        profiles = [
             DeploymentProfile(
                 id="local-dev",
                 label="Local development host",
@@ -259,6 +264,8 @@ class RuntimeAdapter:
                 secret_placeholders=[
                     "Create streamterminal-relay.env from the example file on the host and keep it outside git.",
                 ],
+                source="builtin",
+                editable=False,
             ),
             DeploymentProfile(
                 id="staging-vm",
@@ -279,6 +286,8 @@ class RuntimeAdapter:
                 secret_placeholders=[
                     "Inject real output endpoints via remote env/secrets, not by committing them into repo defaults.",
                 ],
+                source="builtin",
+                editable=False,
             ),
             DeploymentProfile(
                 id="production-vm",
@@ -299,17 +308,30 @@ class RuntimeAdapter:
                 secret_placeholders=[
                     "Do not store production stream keys in repo-tracked files or chat transcripts.",
                 ],
+                source="builtin",
+                editable=False,
             ),
         ]
+        return profiles + (custom_profiles or [])
 
-    def deployment_profile(self, profile_id: str) -> DeploymentProfile:
-        for profile in self.deployment_profiles():
+    def deployment_profile(
+        self,
+        profile_id: str,
+        custom_profiles: list[DeploymentProfile] | None = None,
+    ) -> DeploymentProfile:
+        for profile in self.deployment_profiles(custom_profiles):
             if profile.id == profile_id:
                 return profile
         raise ValueError(f"Unknown deployment profile: {profile_id}")
 
-    def deployment_plan(self, config: RelayConfig, profile_id: str, latest_revision: Any | None = None) -> DeploymentPlanResponse:
-        profile = self.deployment_profile(profile_id)
+    def deployment_plan(
+        self,
+        config: RelayConfig,
+        profile_id: str,
+        latest_revision: Any | None = None,
+        custom_profiles: list[DeploymentProfile] | None = None,
+    ) -> DeploymentPlanResponse:
+        profile = self.deployment_profile(profile_id, custom_profiles)
         staged = self.install_artifacts(config)
         files: list[DeploymentPlannedFile] = []
         config_dir = profile.path_roots["config_dir"]
@@ -337,39 +359,88 @@ class RuntimeAdapter:
                 )
             )
 
-        commands = self._deployment_commands(profile, files, config_dir)
-        warnings = self._deployment_warnings(config, profile)
-        secret_templates = [self.relay_secret_template(config, config_dir)]
-
         return DeploymentPlanResponse(
             profile=profile,
             staged_root=str(self.install_root),
             generated_at=datetime.now(UTC).isoformat(),
             latest_revision=latest_revision,
             files=files,
-            commands=commands,
-            secret_templates=secret_templates,
-            warnings=warnings,
+            commands=self._deployment_commands(profile, files, config_dir),
+            secret_templates=[self.relay_secret_template(config, config_dir)],
+            warnings=self._deployment_warnings(config, profile),
         )
 
-    def execute_deployment_bundle(self, config: RelayConfig, profile_id: str, execute: bool, latest_revision: Any | None = None) -> DeployExecuteResponse:
-        plan = self.deployment_plan(config, profile_id, latest_revision)
+    def deployment_audit(
+        self,
+        config: RelayConfig,
+        profile_id: str,
+        latest_revision: Any | None = None,
+        custom_profiles: list[DeploymentProfile] | None = None,
+    ) -> DeploymentAuditResponse:
+        plan = self.deployment_plan(config, profile_id, latest_revision, custom_profiles)
+        previous_bundle = self._latest_bundle_dir(plan.profile.id)
+        previous_manifest = self._load_bundle_manifest(previous_bundle)
+        previous_map = {
+            item["target_path"]: item.get("sha256")
+            for item in previous_manifest.get("files", [])
+        }
+
+        audit_files: list[DeploymentAuditFile] = []
+        changed = 0
+        unchanged = 0
+        new_files = 0
+
+        for file in plan.files:
+            sha256 = self._file_sha256(Path(file.source_path))
+            previous_sha = previous_map.get(file.target_path)
+            if previous_sha is None:
+                status = "new"
+                new_files += 1
+            elif previous_sha != sha256:
+                status = "changed"
+                changed += 1
+            else:
+                status = "unchanged"
+                unchanged += 1
+            audit_files.append(
+                DeploymentAuditFile(
+                    name=file.name,
+                    target_path=file.target_path,
+                    bytes=file.bytes,
+                    sha256=sha256,
+                    previous_sha256=previous_sha,
+                    changed=status != "unchanged",
+                    status=status,
+                )
+            )
+
+        return DeploymentAuditResponse(
+            profile=plan.profile,
+            generated_at=datetime.now(UTC).isoformat(),
+            latest_revision=latest_revision,
+            compared_bundle=str(previous_bundle) if previous_bundle else None,
+            summary=DeploymentAuditSummary(
+                total_files=len(audit_files),
+                changed_files=changed,
+                unchanged_files=unchanged,
+                new_files=new_files,
+            ),
+            files=audit_files,
+        )
+
+    def execute_deployment_bundle(
+        self,
+        config: RelayConfig,
+        profile_id: str,
+        execute: bool,
+        latest_revision: Any | None = None,
+        custom_profiles: list[DeploymentProfile] | None = None,
+    ) -> DeployExecuteResponse:
+        plan = self.deployment_plan(config, profile_id, latest_revision, custom_profiles)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        bundle_dir = self.bundle_root / f"{timestamp}-{profile_id}"
+        bundle_dir = self.bundle_root / f"{timestamp}-{plan.profile.id}"
 
         if not execute:
-            preview_steps = [
-                DeploymentExecutionStep(
-                    label="Preview deploy bundle",
-                    status="preview",
-                    detail=f"Would create bundle under {bundle_dir} without touching any target host.",
-                ),
-                DeploymentExecutionStep(
-                    label="Review env template",
-                    status="preview",
-                    detail="Would include a placeholder-only env example and masked current values report.",
-                ),
-            ]
             return DeployExecuteResponse(
                 ok=True,
                 executed=False,
@@ -378,7 +449,18 @@ class RuntimeAdapter:
                 bundle_root=str(bundle_dir),
                 remote_touched=False,
                 files_created=[],
-                steps=preview_steps,
+                steps=[
+                    DeploymentExecutionStep(
+                        label="Preview deploy bundle",
+                        status="preview",
+                        detail=f"Would create bundle under {bundle_dir} without touching any target host.",
+                    ),
+                    DeploymentExecutionStep(
+                        label="Review env template",
+                        status="preview",
+                        detail="Would include a placeholder-only env example and masked current values report.",
+                    ),
+                ],
                 warnings=plan.warnings,
                 next_actions=self._next_actions(plan.profile),
             )
@@ -388,6 +470,7 @@ class RuntimeAdapter:
         rootfs_dir.mkdir(parents=True, exist_ok=True)
         files_created: list[str] = []
         steps: list[DeploymentExecutionStep] = []
+        manifest_files: list[dict[str, Any]] = []
 
         for file in plan.files:
             target = rootfs_dir / file.target_path.lstrip("/")
@@ -397,6 +480,15 @@ class RuntimeAdapter:
             if target.suffix == ".sh":
                 target.chmod(0o755)
             files_created.append(str(target))
+            manifest_files.append(
+                {
+                    "name": file.name,
+                    "source_path": file.source_path,
+                    "target_path": file.target_path,
+                    "bytes": file.bytes,
+                    "sha256": self._file_sha256(source),
+                }
+            )
             steps.append(
                 DeploymentExecutionStep(
                     label=f"Bundle {file.name}",
@@ -425,6 +517,26 @@ class RuntimeAdapter:
                 label="Write secret template report",
                 status="created",
                 detail=f"Created {secret_report}",
+            )
+        )
+
+        manifest = bundle_dir / "deploy-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "profile_id": plan.profile.id,
+                    "generated_at": plan.generated_at,
+                    "files": manifest_files,
+                },
+                indent=2,
+            )
+        )
+        files_created.append(str(manifest))
+        steps.append(
+            DeploymentExecutionStep(
+                label="Write deploy manifest",
+                status="created",
+                detail=f"Created {manifest}",
             )
         )
 
@@ -463,7 +575,6 @@ class RuntimeAdapter:
             "rsync": ["rsync", "--version"],
             "ssh": ["ssh", "-V"],
         }
-
         return {
             "runtime_dir": str(self.runtime_dir),
             "install_root": str(self.install_root),
@@ -478,7 +589,6 @@ class RuntimeAdapter:
     def service_action(self, service_name: str, action: str, execute: bool = False) -> dict[str, Any]:
         unit_name = self._unit_name(service_name)
         command = self._systemctl_command(action, unit_name)
-
         if not execute:
             return {
                 "ok": True,
@@ -491,7 +601,6 @@ class RuntimeAdapter:
                 "stderr": "",
                 "exit_code": 0,
             }
-
         return {
             "service": service_name,
             "unit": unit_name,
@@ -511,11 +620,9 @@ class RuntimeAdapter:
                 "lines": [],
                 "detail": "journalctl not available on host",
             }
-
         command = [journalctl, "-u", unit_name, "-n", str(lines), "--no-pager"]
         result = self._run_command(command)
         output = result.get("stdout") or result.get("stderr") or ""
-
         return {
             "service": service_name,
             "unit": unit_name,
@@ -533,14 +640,7 @@ class RuntimeAdapter:
 
         if profile.run_on == "local":
             mkdirs = " ".join(self._shell_escape(profile.path_roots[key]) for key in ["config_dir", "bin_dir", "systemd_dir"])
-            commands.append(
-                DeploymentCommand(
-                    phase="prepare",
-                    label="Create target directories",
-                    run_on="local",
-                    command=f"sudo mkdir -p {mkdirs}",
-                )
-            )
+            commands.append(DeploymentCommand(phase="prepare", label="Create target directories", run_on="local", command=f"sudo mkdir -p {mkdirs}"))
             for file in files:
                 mode = "0755" if file.name.endswith(".sh") else "0644"
                 commands.append(
@@ -553,30 +653,10 @@ class RuntimeAdapter:
                 )
             commands.extend(
                 [
-                    DeploymentCommand(
-                        phase="copy",
-                        label="Create live env file from example",
-                        run_on="local",
-                        command=f"sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}",
-                    ),
-                    DeploymentCommand(
-                        phase="activate",
-                        label="Reload systemd",
-                        run_on="local",
-                        command="sudo systemctl daemon-reload",
-                    ),
-                    DeploymentCommand(
-                        phase="activate",
-                        label="Restart services",
-                        run_on="local",
-                        command="sudo systemctl restart mediamtx.service stream-failover-relay.service",
-                    ),
-                    DeploymentCommand(
-                        phase="verify",
-                        label="Check service state",
-                        run_on="local",
-                        command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager",
-                    ),
+                    DeploymentCommand(phase="copy", label="Create live env file from example", run_on="local", command=f"sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}"),
+                    DeploymentCommand(phase="activate", label="Reload systemd", run_on="local", command="sudo systemctl daemon-reload"),
+                    DeploymentCommand(phase="activate", label="Restart services", run_on="local", command="sudo systemctl restart mediamtx.service stream-failover-relay.service"),
+                    DeploymentCommand(phase="verify", label="Check service state", run_on="local", command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager"),
                 ]
             )
             return commands
@@ -601,30 +681,10 @@ class RuntimeAdapter:
             )
         commands.extend(
             [
-                DeploymentCommand(
-                    phase="copy",
-                    label="Create remote env file from example",
-                    run_on="remote",
-                    command="ssh " + self._shell_escape(target) + " " + self._shell_escape(f"sudo cp {env_example} {env_live} && sudo chmod 600 {env_live}"),
-                ),
-                DeploymentCommand(
-                    phase="activate",
-                    label="Reload systemd on remote host",
-                    run_on="remote",
-                    command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl daemon-reload"),
-                ),
-                DeploymentCommand(
-                    phase="activate",
-                    label="Restart remote services",
-                    run_on="remote",
-                    command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl restart mediamtx.service stream-failover-relay.service"),
-                ),
-                DeploymentCommand(
-                    phase="verify",
-                    label="Verify remote service state",
-                    run_on="remote",
-                    command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager"),
-                ),
+                DeploymentCommand(phase="copy", label="Create remote env file from example", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape(f"sudo cp {env_example} {env_live} && sudo chmod 600 {env_live}")),
+                DeploymentCommand(phase="activate", label="Reload systemd on remote host", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl daemon-reload")),
+                DeploymentCommand(phase="activate", label="Restart remote services", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl restart mediamtx.service stream-failover-relay.service")),
+                DeploymentCommand(phase="verify", label="Verify remote service state", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager")),
             ]
         )
         return commands
@@ -691,6 +751,18 @@ class RuntimeAdapter:
             "Run the reviewed rsync/ssh commands manually once SSH access and rollback steps are confirmed.",
         ]
 
+    def _latest_bundle_dir(self, profile_id: str) -> Path | None:
+        candidates = sorted(self.bundle_root.glob(f"*-{profile_id}"))
+        return candidates[-1] if candidates else None
+
+    def _load_bundle_manifest(self, bundle_dir: Path | None) -> dict[str, Any]:
+        if bundle_dir is None:
+            return {}
+        manifest = bundle_dir / "deploy-manifest.json"
+        if not manifest.exists():
+            return {}
+        return json.loads(manifest.read_text())
+
     def _unit_name(self, service_name: str) -> str:
         try:
             return self.SERVICE_UNIT_MAP[service_name]
@@ -716,10 +788,8 @@ class RuntimeAdapter:
         binary = command[0]
         resolved = shutil.which(binary)
         result: dict[str, Any] = {"binary": binary, "path": resolved, "available": bool(resolved)}
-
         if not resolved:
             return result
-
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
             output = completed.stdout or completed.stderr
@@ -727,18 +797,21 @@ class RuntimeAdapter:
             result["preview"] = "\n".join(output.splitlines()[:3])
         except Exception as exc:  # pragma: no cover
             result["error"] = str(exc)
-
         return result
 
     def _probe_systemd_unit(self, unit_name: str) -> dict[str, Any]:
         systemctl = shutil.which("systemctl")
         result: dict[str, Any] = {"unit": unit_name, "available": bool(systemctl)}
-
         if not systemctl:
             return result
-
         try:
-            completed = subprocess.run([systemctl, "show", unit_name, "--property=LoadState,ActiveState,SubState,UnitFileState", "--no-pager"], capture_output=True, text=True, timeout=5, check=False)
+            completed = subprocess.run(
+                [systemctl, "show", unit_name, "--property=LoadState,ActiveState,SubState,UnitFileState", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
             result["exit_code"] = completed.returncode
             parsed: dict[str, str] = {}
             for line in (completed.stdout or completed.stderr).splitlines():
@@ -748,7 +821,6 @@ class RuntimeAdapter:
             result["state"] = parsed
         except Exception as exc:  # pragma: no cover
             result["error"] = str(exc)
-
         return result
 
     def _run_command(self, command: list[str]) -> dict[str, Any]:
@@ -769,6 +841,10 @@ class RuntimeAdapter:
                 "stdout": "",
                 "stderr": str(exc),
             }
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
     @staticmethod
     def _shell_escape(value: str) -> str:

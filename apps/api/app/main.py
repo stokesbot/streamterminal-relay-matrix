@@ -9,12 +9,14 @@ from .schemas import (
     ApplyResult,
     DeployExecuteRequest,
     DeployExecuteResponse,
+    DeploymentAuditResponse,
     DeploymentPlanResponse,
     DeploymentProfile,
     DiagnosticsResponse,
     InstallResult,
     RelayConfig,
     RuntimeStatus,
+    SavedDeploymentProfileRequest,
     ServiceActionRequest,
     ServiceActionResult,
     ServiceLogsResponse,
@@ -33,57 +35,19 @@ def validate_config(config: RelayConfig) -> ValidationResult:
     issues: list[ValidationIssue] = []
 
     if config.primary_input.url == config.backup_input.url:
-        issues.append(
-            ValidationIssue(
-                level="warning",
-                message="Primary and backup input URLs are identical.",
-            )
-        )
-
+        issues.append(ValidationIssue(level="warning", message="Primary and backup input URLs are identical."))
     if config.output.protocol != "rtmp":
-        issues.append(
-            ValidationIssue(
-                level="info",
-                message="Only RTMP output has been validated in the current live test stack.",
-            )
-        )
-
+        issues.append(ValidationIssue(level="info", message="Only RTMP output has been validated in the current live test stack."))
     if not config.primary_input.enabled and not config.backup_input.enabled:
-        issues.append(
-            ValidationIssue(
-                level="error",
-                message="At least one input must be enabled.",
-            )
-        )
-
+        issues.append(ValidationIssue(level="error", message="At least one input must be enabled."))
     if not config.output.enabled:
-        issues.append(
-            ValidationIssue(
-                level="error",
-                message="Output must be enabled.",
-            )
-        )
-
+        issues.append(ValidationIssue(level="error", message="Output must be enabled."))
     if config.primary_input.protocol != config.backup_input.protocol:
-        issues.append(
-            ValidationIssue(
-                level="warning",
-                message="Primary and backup protocols differ. Real failover may need extra normalization logic.",
-            )
-        )
-
+        issues.append(ValidationIssue(level="warning", message="Primary and backup protocols differ. Real failover may need extra normalization logic."))
     if not config.output.url.startswith(("rtmp://", "srt://", "rtsp://", "udp://", "file://")):
-        issues.append(
-            ValidationIssue(
-                level="error",
-                message="Output URL must include a supported protocol prefix.",
-            )
-        )
+        issues.append(ValidationIssue(level="error", message="Output URL must include a supported protocol prefix."))
 
-    return ValidationResult(
-        valid=not any(issue.level == "error" for issue in issues),
-        issues=issues,
-    )
+    return ValidationResult(valid=not any(issue.level == "error" for issue in issues), issues=issues)
 
 
 @asynccontextmanager
@@ -130,18 +94,8 @@ def apply_config() -> ApplyResult:
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     artifacts = runtime.write_runtime_artifacts(config)
-    revision = store.create_revision(
-        config,
-        status="applied",
-        note="Generated local runtime artifacts for the current draft.",
-    )
-
-    return ApplyResult(
-        ok=True,
-        version=revision.version,
-        note=revision.note,
-        artifacts=[artifact.path for artifact in artifacts],
-    )
+    revision = store.create_revision(config, status="applied", note="Generated local runtime artifacts for the current draft.")
+    return ApplyResult(ok=True, version=revision.version, note=revision.note, artifacts=[artifact.path for artifact in artifacts])
 
 
 @app.post("/api/config/rollback", response_model=ApplyResult)
@@ -153,17 +107,8 @@ def rollback_config() -> ApplyResult:
     previous = revisions[-2]
     store.save(previous.payload)
     artifacts = runtime.write_runtime_artifacts(previous.payload)
-    rollback_revision = store.mark_rollback(
-        previous.payload,
-        note=f"Rolled back to revision {previous.version}.",
-    )
-
-    return ApplyResult(
-        ok=True,
-        version=rollback_revision.version,
-        note=rollback_revision.note,
-        artifacts=[artifact.path for artifact in artifacts],
-    )
+    rollback_revision = store.mark_rollback(previous.payload, note=f"Rolled back to revision {previous.version}.")
+    return ApplyResult(ok=True, version=rollback_revision.version, note=rollback_revision.note, artifacts=[artifact.path for artifact in artifacts])
 
 
 @app.post("/api/runtime/install", response_model=InstallResult)
@@ -174,16 +119,17 @@ def install_runtime() -> InstallResult:
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     installed = runtime.install_artifacts(config)
-    return InstallResult(
-        ok=True,
-        installed_to=str(runtime.install_root),
-        artifacts=[artifact.path for artifact in installed],
-    )
+    return InstallResult(ok=True, installed_to=str(runtime.install_root), artifacts=[artifact.path for artifact in installed])
 
 
 @app.get("/api/deploy/profiles", response_model=list[DeploymentProfile])
 def deploy_profiles() -> list[DeploymentProfile]:
-    return runtime.deployment_profiles()
+    return runtime.deployment_profiles(store.list_target_profiles())
+
+
+@app.post("/api/deploy/targets", response_model=DeploymentProfile)
+def save_deploy_target(request: SavedDeploymentProfileRequest) -> DeploymentProfile:
+    return store.save_target_profile(request)
 
 
 @app.get("/api/deploy/plan", response_model=DeploymentPlanResponse)
@@ -194,11 +140,20 @@ def deploy_plan(profile_id: str = Query(default="local-dev")) -> DeploymentPlanR
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     try:
-        return runtime.deployment_plan(
-            config,
-            profile_id=profile_id,
-            latest_revision=store.latest_revision(),
-        )
+        return runtime.deployment_plan(config, profile_id=profile_id, latest_revision=store.latest_revision(), custom_profiles=store.list_target_profiles())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/deploy/audit", response_model=DeploymentAuditResponse)
+def deploy_audit(profile_id: str = Query(default="local-dev")) -> DeploymentAuditResponse:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    try:
+        return runtime.deployment_audit(config, profile_id=profile_id, latest_revision=store.latest_revision(), custom_profiles=store.list_target_profiles())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -216,6 +171,7 @@ def deploy_execute(request: DeployExecuteRequest) -> DeployExecuteResponse:
             profile_id=request.profile_id,
             execute=request.execute,
             latest_revision=store.latest_revision(),
+            custom_profiles=store.list_target_profiles(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -228,12 +184,7 @@ def runtime_status() -> RuntimeStatus:
     host = runtime.host_snapshot()
     mediamtx_tool = host["tools"]["mediamtx"]
     relay_tool = host["tools"]["stream-failover-relay"]
-
-    status_detail = (
-        f"Draft applied in revision {latest_revision.version}"
-        if latest_revision
-        else "No applied revision yet"
-    )
+    status_detail = f"Draft applied in revision {latest_revision.version}" if latest_revision else "No applied revision yet"
 
     return RuntimeStatus(
         active_source="primary",
@@ -243,29 +194,13 @@ def runtime_status() -> RuntimeStatus:
         services=[
             ServiceStatus(
                 name="mediamtx",
-                status=(
-                    "running"
-                    if config.mediamtx_enabled and mediamtx_tool.get("available")
-                    else "stopped"
-                ),
-                detail=(
-                    f"{status_detail}; binary at {mediamtx_tool.get('path')}"
-                    if mediamtx_tool.get("available")
-                    else f"{status_detail}; mediamtx binary not found on host"
-                ),
+                status="running" if config.mediamtx_enabled and mediamtx_tool.get("available") else "stopped",
+                detail=f"{status_detail}; binary at {mediamtx_tool.get('path')}" if mediamtx_tool.get("available") else f"{status_detail}; mediamtx binary not found on host",
             ),
             ServiceStatus(
                 name="stream-failover-relay",
-                status=(
-                    "running"
-                    if config.relay_enabled and relay_tool.get("available")
-                    else "stopped"
-                ),
-                detail=(
-                    f"Relay binary at {relay_tool.get('path')}"
-                    if relay_tool.get("available")
-                    else "Relay binary not found on host"
-                ),
+                status="running" if config.relay_enabled and relay_tool.get("available") else "stopped",
+                detail=f"Relay binary at {relay_tool.get('path')}" if relay_tool.get("available") else "Relay binary not found on host",
             ),
         ],
         recent_events=[
@@ -275,6 +210,8 @@ def runtime_status() -> RuntimeStatus:
             "Runtime install staging and service-control APIs are now available",
             "Deployment planning profiles now preview staged-to-target copy and activation steps",
             "Safe deploy bundle execution now writes env-template-aware bundles without touching target hosts",
+            "Deployment audit now compares file checksums against the latest bundle for each profile",
+            "Saved target profiles now persist outside git-tracked deployment code",
         ],
     )
 

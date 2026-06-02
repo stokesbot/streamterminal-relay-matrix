@@ -7,10 +7,11 @@ ConnectionMode = Literal["pull", "push", "listener", "caller"]
 IssueLevel = Literal["info", "warning", "error"]
 ServiceName = Literal["mediamtx", "stream-failover-relay"]
 ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-reload"]
-DeploymentProfileId = Literal["local-dev", "staging-vm", "production-vm"]
+DeploymentProfileId = str
 DeploymentRunOn = Literal["local", "remote"]
 DeploymentPhase = Literal["prepare", "copy", "activate", "verify"]
 DeploymentExecutionMode = Literal["preview", "bundle"]
+DeploymentProfileSource = Literal["builtin", "saved"]
 
 
 class StreamEndpoint(BaseModel):
@@ -120,6 +121,26 @@ class DeploymentProfile(BaseModel):
     path_roots: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
     secret_placeholders: list[str] = Field(default_factory=list)
+    source: DeploymentProfileSource = "builtin"
+    editable: bool = False
+
+
+class SavedDeploymentProfileRequest(BaseModel):
+    id: str | None = Field(default=None, min_length=3, max_length=64)
+    label: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=300)
+    run_on: DeploymentRunOn = "remote"
+    target_host: str = Field(min_length=1, max_length=255)
+    target_user: str = Field(min_length=1, max_length=64)
+    path_roots: dict[str, str] = Field(
+        default_factory=lambda: {
+            "config_dir": "/etc/streamterminal-relay-matrix",
+            "bin_dir": "/usr/local/bin",
+            "systemd_dir": "/etc/systemd/system",
+        }
+    )
+    notes: list[str] = Field(default_factory=list)
+    secret_placeholders: list[str] = Field(default_factory=list)
 
 
 class DeploymentCommand(BaseModel):
@@ -180,6 +201,32 @@ class DeployExecuteResponse(BaseModel):
     steps: list[DeploymentExecutionStep] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
+
+
+class DeploymentAuditFile(BaseModel):
+    name: str
+    target_path: str
+    bytes: int
+    sha256: str
+    previous_sha256: str | None = None
+    changed: bool
+    status: Literal["new", "changed", "unchanged"]
+
+
+class DeploymentAuditSummary(BaseModel):
+    total_files: int
+    changed_files: int
+    unchanged_files: int
+    new_files: int
+
+
+class DeploymentAuditResponse(BaseModel):
+    profile: DeploymentProfile
+    generated_at: str
+    latest_revision: ConfigRevision | None = None
+    compared_bundle: str | None = None
+    summary: DeploymentAuditSummary
+    files: list[DeploymentAuditFile] = Field(default_factory=list)
 
 
 class DiagnosticsResponse(BaseModel):

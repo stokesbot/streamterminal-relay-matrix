@@ -1,8 +1,9 @@
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .schemas import ConfigRevision, RelayConfig
+from .schemas import ConfigRevision, DeploymentProfile, RelayConfig, SavedDeploymentProfileRequest
 
 DEFAULT_CONFIG = RelayConfig(
     channel_name="IBM VS Failover",
@@ -39,6 +40,7 @@ class ConfigStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.base_dir / "draft-config.json"
         self.revisions_path = self.base_dir / "revisions.json"
+        self.target_profiles_path = self.base_dir / "deploy-targets.json"
         self.runtime_dir = self.base_dir / "runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,3 +87,49 @@ class ConfigStore:
 
     def mark_rollback(self, config: RelayConfig, note: str) -> ConfigRevision:
         return self.create_revision(config, status="rolled_back", note=note)
+
+    def list_target_profiles(self) -> list[DeploymentProfile]:
+        if not self.target_profiles_path.exists():
+            return []
+
+        payload = json.loads(self.target_profiles_path.read_text())
+        return [DeploymentProfile.model_validate(item) for item in payload]
+
+    def save_target_profile(self, request: SavedDeploymentProfileRequest) -> DeploymentProfile:
+        profiles = self.list_target_profiles()
+        profile_id = request.id or self._slugify(request.label)
+        if not profile_id.startswith("saved-"):
+            profile_id = f"saved-{profile_id}"
+
+        profile = DeploymentProfile(
+            id=profile_id,
+            label=request.label,
+            description=request.description,
+            run_on=request.run_on,
+            target_host=request.target_host,
+            target_user=request.target_user,
+            path_roots=request.path_roots,
+            notes=request.notes,
+            secret_placeholders=request.secret_placeholders,
+            source="saved",
+            editable=True,
+        )
+
+        replaced = False
+        for index, existing in enumerate(profiles):
+            if existing.id == profile.id:
+                profiles[index] = profile
+                replaced = True
+                break
+        if not replaced:
+            profiles.append(profile)
+
+        self.target_profiles_path.write_text(
+            json.dumps([item.model_dump(mode="json") for item in profiles], indent=2) + "\n"
+        )
+        return profile
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+        return slug or "custom-target"

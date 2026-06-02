@@ -75,6 +75,8 @@ http://127.0.0.1:3000
 - configuration page
 - diagnostics page with artifact previews, host tool probes, and systemd unit state
 - deployment planning page with profile selection, staged-vs-target mapping, command previews, and rollout notes
+- deployment audit view with file checksums, changed/new/unchanged summaries, and latest-bundle comparison
+- saved target profile creation stored outside git-tracked repo files
 - safe deploy execution page actions for preview mode and local bundle generation
 - backend draft config load/save
 - backend config validation endpoint
@@ -83,7 +85,8 @@ http://127.0.0.1:3000
 - generated systemd unit templates for both runtime services
 - placeholder-only env-file template generation with masked current URL previews
 - staged local install layout under `apps/api/data/runtime/install-root/`
-- deployment profile API and staged-to-target rollout plan endpoint
+- deployment profile API, saved-target API, and staged-to-target rollout plan endpoint
+- deployment audit endpoint backed by per-bundle manifests and sha256 comparison
 - safe deploy bundle execution endpoint that writes reviewed artifacts under `apps/api/data/runtime/deploy-bundles/`
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
@@ -117,4 +120,4 @@ Design the data model so multi-channel support can be added later.
 
 ## Status
 
-Prototype scaffold complete. Runtime integration, service controls, diagnostics, deployment planning, and safe local bundle generation are now wired. Real remote deployment execution should remain manual until host-specific auth, secrets, and rollback policies are finalized.
+Prototype scaffold complete. Runtime integration, service controls, diagnostics, deployment planning, safe local bundle generation, deployment audits, and saved target profiles are now wired. Real remote deployment execution should remain manual until host-specific auth, secrets, and rollback policies are finalized.
