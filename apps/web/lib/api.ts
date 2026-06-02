@@ -170,6 +170,28 @@ export type DeploymentPlan = {
   warnings: string[];
 };
 
+export type SmokeCheckStatus = "pass" | "warn" | "fail";
+
+export type SmokeCheck = {
+  name: string;
+  status: SmokeCheckStatus;
+  detail: string;
+};
+
+export type SmokeSummary = {
+  ok: boolean;
+  pass_count: number;
+  warn_count: number;
+  fail_count: number;
+};
+
+export type SmokeResponse = {
+  generated_at: string;
+  ok: boolean;
+  summary: SmokeSummary;
+  checks: SmokeCheck[];
+};
+
 export type DeploymentAudit = {
   profile: DeploymentProfile;
   generated_at: string;

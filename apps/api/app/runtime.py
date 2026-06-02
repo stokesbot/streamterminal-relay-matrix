@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -137,6 +138,10 @@ class RuntimeAdapter:
             f"ExecStart={mediamtx_binary} {config_path}\n"
             "Restart=always\n"
             "RestartSec=2\n"
+            "WatchdogSec=60\n"
+            "LimitNOFILE=65536\n"
+            "StandardOutput=journal\n"
+            "StandardError=journal\n"
             f"Environment=STM_CHANNEL_NAME={self._systemd_escape(config.channel_name)}\n\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
@@ -158,6 +163,10 @@ class RuntimeAdapter:
             f"ExecStart={command_path}\n"
             "Restart=always\n"
             "RestartSec=2\n"
+            "LimitNOFILE=65536\n"
+            "MemoryMax=512M\n"
+            "StandardOutput=journal\n"
+            "StandardError=journal\n"
             f"Environment=STM_RELAY_BINARY={relay_binary}\n"
             f"Environment=STM_ENV_FILE={env_path}\n"
             f"Environment=STM_CHANNEL_NAME={self._systemd_escape(config.channel_name)}\n\n"
@@ -726,6 +735,175 @@ class RuntimeAdapter:
             "lines": output.splitlines(),
             "detail": "journalctl query executed",
         }
+
+    CRASH_LOOP_RESTART_THRESHOLD = 3
+
+    def runtime_smoke(self, config: RelayConfig) -> dict[str, Any]:
+        """Return a structured smoke report for the local relay stack.
+
+        Performs six checks:
+            1. mediamtx.service active+running
+            2. mediamtx is actually listening on :1935
+            3. stream-failover-relay.service active+running, not crash-looping
+            4. primary input URL is TCP-reachable
+            5. backup input URL is TCP-reachable
+            6. output URL is TCP-reachable
+        """
+        checks: list[dict[str, str]] = []
+
+        mediamtx_state = self._probe_systemd_unit(self.SERVICE_UNIT_MAP["mediamtx"]).get("state", {})
+        mediamtx_active = (
+            mediamtx_state.get("ActiveState") == "active"
+            and mediamtx_state.get("SubState") == "running"
+        )
+        checks.append(
+            {
+                "name": "mediamtx service",
+                "status": "pass" if mediamtx_active else "fail",
+                "detail": self._state_detail(mediamtx_state),
+            }
+        )
+
+        listen_check = self._verify_listen_port(self.DEFAULT_RTMP_LISTEN_PORT)
+        if listen_check["ok"]:
+            listeners_text = ", ".join(listen_check["listeners"]) or "(none reported)"
+            listen_detail = f"mediamtx is listening on :{listen_check['port']} ({listeners_text})."
+            listen_status = "pass"
+        else:
+            listen_detail = (
+                f"mediamtx is not listening on :{listen_check['port']} right now. "
+                "Check the mediamtx.service journal for bind failures or port conflicts."
+            )
+            listen_status = "fail"
+        checks.append(
+            {
+                "name": "mediamtx rtmp listener",
+                "status": listen_status,
+                "detail": listen_detail,
+            }
+        )
+
+        relay_state = self._probe_systemd_unit(self.SERVICE_UNIT_MAP["stream-failover-relay"]).get("state", {})
+        relay_active = (
+            relay_state.get("ActiveState") == "active"
+            and relay_state.get("SubState") == "running"
+        )
+        try:
+            nrestarts = int(str(relay_state.get("NRestarts", "0")))
+        except (TypeError, ValueError):
+            nrestarts = 0
+        crash_looping = nrestarts >= self.CRASH_LOOP_RESTART_THRESHOLD
+        if relay_active and not crash_looping:
+            relay_status = "pass"
+        elif not relay_active:
+            relay_status = "fail"
+        else:
+            relay_status = "fail"
+        checks.append(
+            {
+                "name": "stream-failover-relay service",
+                "status": relay_status,
+                "detail": self._state_detail(relay_state)
+                + (
+                    f"; {nrestarts} restarts exceeds crash-loop threshold {self.CRASH_LOOP_RESTART_THRESHOLD}"
+                    if crash_looping
+                    else ""
+                ),
+            }
+        )
+
+        for endpoint_name, endpoint in [
+            ("primary input reachable", config.primary_input),
+            ("backup input reachable", config.backup_input),
+            ("output destination reachable", config.output),
+        ]:
+            check = self._tcp_reachability_check(endpoint, label=endpoint_name)
+            checks.append(check)
+
+        summary = {
+            "ok": all(c["status"] != "fail" for c in checks),
+            "pass_count": sum(1 for c in checks if c["status"] == "pass"),
+            "warn_count": sum(1 for c in checks if c["status"] == "warn"),
+            "fail_count": sum(1 for c in checks if c["status"] == "fail"),
+        }
+
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "ok": summary["ok"],
+            "summary": summary,
+            "checks": checks,
+        }
+
+    def _tcp_reachability_check(self, endpoint: Any, *, label: str) -> dict[str, str]:
+        """Best-effort TCP probe for an RTMP/SRT/RTSP/UDP endpoint.
+
+        Honors `STM_SMOKE_PROBE_OVERRIDE` so tests can stub the result without
+        opening real sockets to upstream RTMP.
+        """
+        if not endpoint.enabled:
+            return {
+                "name": label,
+                "status": "warn",
+                "detail": f"{endpoint.label} is disabled in the draft config.",
+            }
+        override = self._smoke_probe_override(label)
+        if override is not None:
+            return {
+                "name": label,
+                "status": "pass" if override.get("ok") else "fail",
+                "detail": str(override.get("detail", "")),
+            }
+        parsed = urlparse(endpoint.url)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return {
+                "name": label,
+                "status": "fail",
+                "detail": f"{endpoint.label} URL {endpoint.url} has no host/port to probe.",
+            }
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                return {
+                    "name": label,
+                    "status": "pass",
+                    "detail": f"tcp://{host}:{port} reachable",
+                }
+        except OSError as exc:
+            return {
+                "name": label,
+                "status": "fail",
+                "detail": f"tcp://{host}:{port} not reachable: {exc}",
+            }
+
+    @staticmethod
+    def _state_detail(state: dict[str, Any]) -> str:
+        return (
+            f"ActiveState={state.get('ActiveState', 'unknown')}, "
+            f"SubState={state.get('SubState', 'unknown')}, "
+            f"UnitFileState={state.get('UnitFileState', 'unknown')}, "
+            f"ExecMainStatus={state.get('ExecMainStatus', 'unknown')}, "
+            f"NRestarts={state.get('NRestarts', 'unknown')}"
+        )
+
+    @staticmethod
+    def _smoke_probe_override(label: str) -> dict[str, Any] | None:
+        raw = os.environ.get("STM_SMOKE_PROBE_OVERRIDE")
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if "primary" in label:
+            return payload.get("primary")
+        if "backup" in label:
+            return payload.get("backup")
+        if "output" in label:
+            return payload.get("output")
+        return None
 
     def _resolve_deployment_action(self, action: str | None, execute: bool) -> str:
         if action:

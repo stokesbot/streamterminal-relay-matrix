@@ -82,3 +82,28 @@ test("dashboard logs panel populates from the real backend", async ({ page }) =>
   await servicesSection.getByRole("button", { name: "Logs" }).first().click();
   await expect(page.getByText("Latest logs")).toBeVisible();
 });
+
+test("dashboard renders the live smoke panel and can rerun it on demand", async ({ page }) => {
+  await page.goto("/");
+
+  const smokeSection = page.getByTestId("live-smoke-section");
+  await expect(smokeSection).toBeVisible();
+  await expect(smokeSection.getByRole("heading", { name: "Live smoke" })).toBeVisible();
+  await expect(smokeSection.getByText("One-shot probe of mediamtx, the relay, both input paths, and the output destination.")).toBeVisible();
+
+  // All six smoke checks should render.
+  const checks = smokeSection.getByTestId("smoke-check");
+  await expect(checks).toHaveCount(6);
+  await expect(smokeSection.getByText("mediamtx service")).toBeVisible();
+  await expect(smokeSection.getByText("mediamtx rtmp listener")).toBeVisible();
+  await expect(smokeSection.getByText("stream-failover-relay service")).toBeVisible();
+  await expect(smokeSection.getByText("primary input reachable")).toBeVisible();
+  await expect(smokeSection.getByText("backup input reachable")).toBeVisible();
+  await expect(smokeSection.getByText("output destination reachable")).toBeVisible();
+
+  // Click "Run smoke" to force a refresh through the API.
+  await page.getByRole("button", { name: "Run smoke" }).click();
+  await expect(
+    page.locator("section.border-emerald-900", { hasText: "Smoke finished:" }).first()
+  ).toBeVisible({ timeout: 10_000 });
+});

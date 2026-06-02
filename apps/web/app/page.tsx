@@ -14,12 +14,14 @@ import {
   type ServiceActionResult,
   type ServiceLogsResponse,
   type ServiceName,
+  type SmokeResponse,
 } from "@/lib/api";
 
 type DashboardState = {
   runtime?: RuntimeStatus;
   config?: RelayConfig;
   diagnostics?: DiagnosticsResponse;
+  smoke?: SmokeResponse;
   error?: string;
 };
 
@@ -88,12 +90,13 @@ export default function Home() {
 
   const load = useCallback(async () => {
     try {
-      const [runtime, config, diagnostics] = await Promise.all([
+      const [runtime, config, diagnostics, smoke] = await Promise.all([
         fetchJson<RuntimeStatus>("/api/runtime/status"),
         fetchJson<RelayConfig>("/api/config"),
         fetchJson<DiagnosticsResponse>("/api/diagnostics"),
+        fetchJson<SmokeResponse>("/api/runtime/smoke"),
       ]);
-      setState({ runtime, config, diagnostics });
+      setState({ runtime, config, diagnostics, smoke });
     } catch (error) {
       setState({
         error: error instanceof Error ? error.message : "Unable to reach API",
@@ -106,14 +109,15 @@ export default function Home() {
 
     async function initialLoad() {
       try {
-        const [runtime, config, diagnostics] = await Promise.all([
+        const [runtime, config, diagnostics, smoke] = await Promise.all([
           fetchJson<RuntimeStatus>("/api/runtime/status"),
           fetchJson<RelayConfig>("/api/config"),
           fetchJson<DiagnosticsResponse>("/api/diagnostics"),
+          fetchJson<SmokeResponse>("/api/runtime/smoke"),
         ]);
 
         if (!cancelled) {
-          setState({ runtime, config, diagnostics });
+          setState({ runtime, config, diagnostics, smoke });
         }
       } catch (error) {
         if (!cancelled) {
@@ -181,6 +185,15 @@ export default function Home() {
     return runControlAction("Stage install", async () => {
       const payload = await sendJson<InstallResult>("/api/runtime/install", "POST");
       return `Staged ${payload.artifacts.length} runtime files under ${payload.installed_to}.`;
+    });
+  }
+
+  async function runSmoke() {
+    return runControlAction("Run smoke", async () => {
+      const payload = await fetchJson<SmokeResponse>("/api/runtime/smoke");
+      setState((current) => ({ ...current, smoke: payload }));
+      const total = payload.summary.pass_count + payload.summary.warn_count + payload.summary.fail_count;
+      return `Smoke finished: ${payload.summary.pass_count}/${total} pass, ${payload.summary.fail_count} fail.`;
     });
   }
 
@@ -295,6 +308,7 @@ export default function Home() {
                 label="Daemon reload (dry-run)"
                 onClick={() => performServiceAction("mediamtx", "daemon-reload", false)}
               />
+              <ActionButton disabled={actionState.loading} label="Run smoke" onClick={runSmoke} />
             </div>
             <p className="mt-4 text-sm text-slate-400">
               Service buttons below support dry-run previews and direct execution against the local host.
@@ -391,6 +405,54 @@ export default function Home() {
             </div>
           </div>
         </section>
+
+        {state.smoke ? (
+          <section
+            className={`rounded-2xl border p-6 ${state.smoke.ok ? "border-emerald-900 bg-emerald-950/20" : "border-amber-900 bg-amber-950/20"}`}
+            data-testid="live-smoke-section"
+          >
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Live smoke</h2>
+                <p className="mt-2 text-sm text-slate-300">
+                  One-shot probe of mediamtx, the relay, both input paths, and the output destination.
+                </p>
+                <p className="mt-2 text-xs text-slate-500">Generated at {state.smoke.generated_at}</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <StatusPill label="Smoke" value={state.smoke.ok ? "ok" : "failing"} />
+                <StatusPill label="Pass" value={String(state.smoke.summary.pass_count)} />
+                <StatusPill label="Warn" value={String(state.smoke.summary.warn_count)} />
+                <StatusPill label="Fail" value={String(state.smoke.summary.fail_count)} />
+              </div>
+            </div>
+            <div className="mt-5 grid gap-3 xl:grid-cols-2">
+              {state.smoke.checks.map((check) => (
+                <div
+                  key={`${check.name}-${check.detail}`}
+                  className="rounded-xl border border-slate-800 bg-slate-950/70 p-4"
+                  data-testid="smoke-check"
+                >
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="font-medium text-slate-100">{check.name}</div>
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] ${
+                        check.status === "pass"
+                          ? "bg-emerald-950 text-emerald-200"
+                          : check.status === "warn"
+                            ? "bg-amber-950 text-amber-200"
+                            : "bg-rose-950 text-rose-200"
+                      }`}
+                    >
+                      {check.status}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-sm text-slate-300">{check.detail}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <h2 className="text-lg font-semibold">Recent events</h2>
