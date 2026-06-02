@@ -69,6 +69,15 @@ Open:
 http://127.0.0.1:3000
 ```
 
+### Frontend smoke tests
+
+The deploy UI now has Playwright smoke coverage with mocked local deploy API responses, so the browser tests stay local-safe and do not mutate `/etc`, `/usr/local/bin`, or systemd state.
+
+```bash
+cd apps/web
+npm run test:e2e -- tests/deploy.spec.ts
+```
+
 ## Current prototype features
 
 - dashboard shell
