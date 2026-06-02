@@ -1,0 +1,17 @@
+[project]
+name = "relay-matrix-api"
+version = "0.1.0"
+description = "FastAPI control plane for MediaMTX + stream-failover-relay"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic-settings>=2.10.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

@@ -1,0 +1,27 @@
+{
+  "channel_name": "IBM VS Failover",
+  "mediamtx_enabled": true,
+  "relay_enabled": true,
+  "auto_restart": true,
+  "primary_input": {
+    "label": "Primary",
+    "protocol": "rtmp",
+    "url": "rtmp://109.122.217.246:1936/live/main",
+    "mode": "pull",
+    "enabled": true
+  },
+  "backup_input": {
+    "label": "Backup",
+    "protocol": "rtmp",
+    "url": "rtmp://109.122.217.246:1936/live/backup",
+    "mode": "pull",
+    "enabled": true
+  },
+  "output": {
+    "label": "IBM VS",
+    "protocol": "rtmp",
+    "url": "rtmp://example.invalid/live/output",
+    "mode": "push",
+    "enabled": true
+  }
+}
