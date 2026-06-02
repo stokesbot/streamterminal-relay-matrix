@@ -14,7 +14,6 @@ __pycache__/
 
 # Runtime/generated state
 apps/api/data/revisions.json
-apps/api/data/deploy-targets.json
 apps/api/data/runtime/
 
 # OS

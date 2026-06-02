@@ -10,8 +10,6 @@ import {
   type DeploymentAudit,
   type DeploymentPlan,
   type DeploymentProfile,
-  type DeploymentProfileId,
-  type SavedDeploymentProfileRequest,
 } from "@/lib/api";
 
 const phases: Array<DeploymentPlan["commands"][number]["phase"]> = [
@@ -21,26 +19,8 @@ const phases: Array<DeploymentPlan["commands"][number]["phase"]> = [
   "verify",
 ];
 
-const defaultTargetForm: SavedDeploymentProfileRequest = {
-  label: "",
-  description: "",
-  run_on: "remote",
-  target_host: "",
-  target_user: "relayops",
-  path_roots: {
-    config_dir: "/etc/streamterminal-relay-matrix",
-    bin_dir: "/usr/local/bin",
-    systemd_dir: "/etc/systemd/system",
-  },
-  notes: ["Review SSH access and rollback steps before activation."],
-  secret_placeholders: [
-    "Create the live env file on-host and keep secrets outside git.",
-  ],
-};
-
 export default function DeployPage() {
-  const [profiles, setProfiles] = useState<DeploymentProfile[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState<DeploymentProfileId>("local-dev");
+  const [profile, setProfile] = useState<DeploymentProfile | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
   const [audit, setAudit] = useState<DeploymentAudit | null>(null);
   const [execution, setExecution] = useState<DeployExecuteResponse | null>(null);
@@ -48,30 +28,6 @@ export default function DeployPage() {
   const [loading, setLoading] = useState(true);
   const [runningPreview, setRunningPreview] = useState(false);
   const [runningBundle, setRunningBundle] = useState(false);
-  const [savingTarget, setSavingTarget] = useState(false);
-  const [targetForm, setTargetForm] = useState<SavedDeploymentProfileRequest>(defaultTargetForm);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadProfiles() {
-      try {
-        const payload = await fetchJson<DeploymentProfile[]>("/api/deploy/profiles");
-        if (!cancelled) {
-          setProfiles(payload);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Unable to load deployment profiles.");
-        }
-      }
-    }
-
-    void loadProfiles();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,11 +35,13 @@ export default function DeployPage() {
     async function loadDeploymentData() {
       setLoading(true);
       try {
-        const [planPayload, auditPayload] = await Promise.all([
-          fetchJson<DeploymentPlan>(`/api/deploy/plan?profile_id=${selectedProfile}`),
-          fetchJson<DeploymentAudit>(`/api/deploy/audit?profile_id=${selectedProfile}`),
+        const [profilesPayload, planPayload, auditPayload] = await Promise.all([
+          fetchJson<DeploymentProfile[]>("/api/deploy/profiles"),
+          fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
+          fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
         ]);
         if (!cancelled) {
+          setProfile(profilesPayload[0] ?? null);
           setPlan(planPayload);
           setAudit(auditPayload);
           setExecution(null);
@@ -91,7 +49,7 @@ export default function DeployPage() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Unable to load deployment plan.");
+          setError(err instanceof Error ? err.message : "Unable to load local deployment workflow.");
         }
       } finally {
         if (!cancelled) {
@@ -104,7 +62,7 @@ export default function DeployPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProfile]);
+  }, []);
 
   const groupedCommands = useMemo(() => {
     if (!plan) {
@@ -117,12 +75,13 @@ export default function DeployPage() {
     }));
   }, [plan]);
 
-  async function reloadProfiles(nextProfileId?: string) {
-    const payload = await fetchJson<DeploymentProfile[]>("/api/deploy/profiles");
-    setProfiles(payload);
-    if (nextProfileId) {
-      setSelectedProfile(nextProfileId);
-    }
+  async function refreshPlanAndAudit() {
+    const [planPayload, auditPayload] = await Promise.all([
+      fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
+      fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
+    ]);
+    setPlan(planPayload);
+    setAudit(auditPayload);
   }
 
   async function runExecution(execute: boolean) {
@@ -134,15 +93,14 @@ export default function DeployPage() {
 
     try {
       const payload = await sendJson<DeployExecuteResponse>("/api/deploy/execute", "POST", {
-        profile_id: selectedProfile,
+        profile_id: "local-system",
         execute,
       });
       setExecution(payload);
+      await refreshPlanAndAudit();
       setError(null);
-      const auditPayload = await fetchJson<DeploymentAudit>(`/api/deploy/audit?profile_id=${selectedProfile}`);
-      setAudit(auditPayload);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to run deployment action.");
+      setError(err instanceof Error ? err.message : "Unable to run local deployment action.");
     } finally {
       if (execute) {
         setRunningBundle(false);
@@ -152,29 +110,15 @@ export default function DeployPage() {
     }
   }
 
-  async function saveTargetProfile() {
-    setSavingTarget(true);
-    try {
-      const saved = await sendJson<DeploymentProfile>("/api/deploy/targets", "POST", targetForm);
-      await reloadProfiles(saved.id);
-      setTargetForm(defaultTargetForm);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to save target profile.");
-    } finally {
-      setSavingTarget(false);
-    }
-  }
-
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <header className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-6 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-sky-300">Deployment planning</p>
-            <h1 className="mt-2 text-3xl font-semibold">Staging, audit, and rollout workflow</h1>
+            <p className="text-xs uppercase tracking-[0.3em] text-sky-300">Local install workflow</p>
+            <h1 className="mt-2 text-3xl font-semibold">Install and operate on this Linux host</h1>
             <p className="mt-3 max-w-3xl text-sm text-slate-400">
-              Preview staged artifacts, save host targets outside git-tracked code, audit checksums, and generate safe deploy bundles before touching a real host.
+              This page is local-only. It prepares configs, env templates, systemd units, audit hashes, and local sudo command previews for the same machine where the control plane runs.
             </p>
           </div>
           <div className="flex gap-3">
@@ -187,22 +131,17 @@ export default function DeployPage() {
           </div>
         </header>
 
-        <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
-            <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
               <div>
-                <label className="text-sm text-slate-400">Deployment profile</label>
-                <select
-                  className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400"
-                  value={selectedProfile}
-                  onChange={(event) => setSelectedProfile(event.target.value)}
-                >
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.label} {profile.source === "saved" ? "(saved)" : "(builtin)"}
-                    </option>
-                  ))}
-                </select>
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Workflow target</div>
+                <div className="mt-2 text-lg font-semibold text-slate-100">
+                  {profile ? `${profile.label} · ${profile.target_user}@${profile.target_host}` : "Loading local profile..."}
+                </div>
+                <div className="mt-2 text-sm text-slate-400">
+                  {profile?.description ?? "Preparing local deployment profile."}
+                </div>
               </div>
               <div className="flex flex-wrap gap-3">
                 <button
@@ -211,7 +150,7 @@ export default function DeployPage() {
                   onClick={() => void runExecution(false)}
                   type="button"
                 >
-                  {runningPreview ? "Previewing..." : "Preview safe execute"}
+                  {runningPreview ? "Previewing..." : "Preview local apply"}
                 </button>
                 <button
                   className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
@@ -219,56 +158,19 @@ export default function DeployPage() {
                   onClick={() => void runExecution(true)}
                   type="button"
                 >
-                  {runningBundle ? "Generating bundle..." : "Generate deploy bundle"}
+                  {runningBundle ? "Generating bundle..." : "Generate local install bundle"}
                 </button>
               </div>
             </div>
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Saved target profile</p>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400"
-                placeholder="Target label"
-                value={targetForm.label}
-                onChange={(event) => setTargetForm({ ...targetForm, label: event.target.value })}
-              />
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400"
-                placeholder="Target host"
-                value={targetForm.target_host}
-                onChange={(event) => setTargetForm({ ...targetForm, target_host: event.target.value })}
-              />
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400 md:col-span-2"
-                placeholder="Short description"
-                value={targetForm.description}
-                onChange={(event) => setTargetForm({ ...targetForm, description: event.target.value })}
-              />
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400"
-                placeholder="Target user"
-                value={targetForm.target_user}
-                onChange={(event) => setTargetForm({ ...targetForm, target_user: event.target.value })}
-              />
-              <select
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-sky-400"
-                value={targetForm.run_on}
-                onChange={(event) => setTargetForm({ ...targetForm, run_on: event.target.value as "local" | "remote" })}
-              >
-                <option value="remote">remote</option>
-                <option value="local">local</option>
-              </select>
-            </div>
-            <button
-              className="mt-4 rounded-lg border border-emerald-700 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-950/40 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={savingTarget}
-              onClick={() => void saveTargetProfile()}
-              type="button"
-            >
-              {savingTarget ? "Saving target..." : "Save target profile"}
-            </button>
+            <div className="text-xs uppercase tracking-[0.2em] text-slate-400">What changed</div>
+            <ul className="mt-4 space-y-3 text-sm text-slate-300">
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Removed remote/VPS deployment assumptions from this workflow.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">All command previews now target the local host only.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Audit history compares local bundles generated for this machine.</li>
+            </ul>
           </div>
         </section>
 
@@ -280,7 +182,7 @@ export default function DeployPage() {
 
         {loading ? (
           <section className="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-sm text-slate-300">
-            Loading deployment plan and audit...
+            Loading local install workflow...
           </section>
         ) : null}
 
@@ -288,12 +190,12 @@ export default function DeployPage() {
           <section className="rounded-2xl border border-emerald-900 bg-emerald-950/30 p-6">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Safe deploy execution</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Local execution result</p>
                 <h2 className="mt-2 text-xl font-semibold text-slate-100">
                   {execution.executed ? "Bundle written locally" : "Preview generated"}
                 </h2>
                 <p className="mt-2 text-sm text-slate-300">Bundle root: {execution.bundle_root}</p>
-                <p className="mt-1 text-sm text-slate-400">Remote touched: {execution.remote_touched ? "yes" : "no"}</p>
+                <p className="mt-1 text-sm text-slate-400">Host touched: {execution.host_touched ? "yes" : "no"}</p>
               </div>
               <div className="rounded-xl border border-emerald-800 bg-slate-950/70 px-4 py-3 text-sm text-emerald-100">
                 Mode: {execution.mode}
@@ -330,12 +232,12 @@ export default function DeployPage() {
           <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <h2 className="text-lg font-semibold">Deployment audit</h2>
+                <h2 className="text-lg font-semibold">Local deployment audit</h2>
                 <p className="mt-2 text-sm text-slate-400">
-                  Compare current staged files against the latest bundle for this profile.
+                  Compare current staged files against the latest local install bundle for this host.
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  Compared bundle: {audit.compared_bundle ?? "No earlier bundle found for this profile"}
+                  Compared bundle: {audit.compared_bundle ?? "No earlier local bundle found yet"}
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-4">
@@ -372,7 +274,7 @@ export default function DeployPage() {
           <>
             <section className="grid gap-4 lg:grid-cols-3">
               <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
-                <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Target host</div>
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Local host</div>
                 <div className="mt-3 text-lg font-semibold text-slate-100">{plan.profile.target_user}@{plan.profile.target_host}</div>
                 <div className="mt-2 text-sm text-slate-400">{plan.profile.description}</div>
               </div>
@@ -391,7 +293,7 @@ export default function DeployPage() {
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
               <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-                <h2 className="text-lg font-semibold">Planned file copy map</h2>
+                <h2 className="text-lg font-semibold">Planned local file map</h2>
                 <div className="mt-4 space-y-3">
                   {plan.files.map((file) => (
                     <div key={file.name} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
@@ -403,7 +305,7 @@ export default function DeployPage() {
                       </div>
                       <div className="mt-3 text-xs uppercase tracking-[0.2em] text-slate-400">Source</div>
                       <div className="mt-1 break-all text-sm text-slate-300">{file.source_path}</div>
-                      <div className="mt-3 text-xs uppercase tracking-[0.2em] text-slate-400">Target</div>
+                      <div className="mt-3 text-xs uppercase tracking-[0.2em] text-slate-400">Local target</div>
                       <div className="mt-1 break-all text-sm text-slate-300">{file.target_path}</div>
                       <pre className="mt-4 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300">
                         {file.preview}
@@ -415,7 +317,7 @@ export default function DeployPage() {
 
               <div className="space-y-4">
                 <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-                  <h2 className="text-lg font-semibold">Profile notes</h2>
+                  <h2 className="text-lg font-semibold">Host notes</h2>
                   <ul className="mt-4 space-y-3 text-sm text-slate-300">
                     {plan.profile.notes.map((note) => (
                       <li key={note} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
@@ -468,7 +370,7 @@ export default function DeployPage() {
             </section>
 
             <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-              <h2 className="text-lg font-semibold">Execution plan</h2>
+              <h2 className="text-lg font-semibold">Local execution plan</h2>
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 {groupedCommands.map(({ phase, commands }) => (
                   <div key={phase} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
@@ -477,7 +379,7 @@ export default function DeployPage() {
                       {commands.map((command) => (
                         <div key={`${phase}-${command.label}`} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
                           <div className="font-medium text-slate-100">{command.label}</div>
-                          <div className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">{command.run_on}</div>
+                          <div className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">local</div>
                           <pre className="mt-3 whitespace-pre-wrap text-xs text-slate-300">{command.command}</pre>
                         </div>
                       ))}

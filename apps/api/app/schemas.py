@@ -8,10 +8,10 @@ IssueLevel = Literal["info", "warning", "error"]
 ServiceName = Literal["mediamtx", "stream-failover-relay"]
 ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-reload"]
 DeploymentProfileId = str
-DeploymentRunOn = Literal["local", "remote"]
+DeploymentRunOn = Literal["local"]
 DeploymentPhase = Literal["prepare", "copy", "activate", "verify"]
 DeploymentExecutionMode = Literal["preview", "bundle"]
-DeploymentProfileSource = Literal["builtin", "saved"]
+DeploymentProfileSource = Literal["builtin"]
 
 
 class StreamEndpoint(BaseModel):
@@ -125,24 +125,6 @@ class DeploymentProfile(BaseModel):
     editable: bool = False
 
 
-class SavedDeploymentProfileRequest(BaseModel):
-    id: str | None = Field(default=None, min_length=3, max_length=64)
-    label: str = Field(min_length=1, max_length=128)
-    description: str = Field(min_length=1, max_length=300)
-    run_on: DeploymentRunOn = "remote"
-    target_host: str = Field(min_length=1, max_length=255)
-    target_user: str = Field(min_length=1, max_length=64)
-    path_roots: dict[str, str] = Field(
-        default_factory=lambda: {
-            "config_dir": "/etc/streamterminal-relay-matrix",
-            "bin_dir": "/usr/local/bin",
-            "systemd_dir": "/etc/systemd/system",
-        }
-    )
-    notes: list[str] = Field(default_factory=list)
-    secret_placeholders: list[str] = Field(default_factory=list)
-
-
 class DeploymentCommand(BaseModel):
     phase: DeploymentPhase
     label: str
@@ -180,7 +162,7 @@ class DeploymentPlanResponse(BaseModel):
 
 
 class DeployExecuteRequest(BaseModel):
-    profile_id: DeploymentProfileId = "local-dev"
+    profile_id: DeploymentProfileId = "local-system"
     execute: bool = False
 
 
@@ -196,7 +178,7 @@ class DeployExecuteResponse(BaseModel):
     mode: DeploymentExecutionMode
     profile: DeploymentProfile
     bundle_root: str
-    remote_touched: bool
+    host_touched: bool
     files_created: list[str] = Field(default_factory=list)
     steps: list[DeploymentExecutionStep] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

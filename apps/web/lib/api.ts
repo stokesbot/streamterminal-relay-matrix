@@ -99,26 +99,14 @@ export type DeploymentProfile = {
   id: DeploymentProfileId;
   label: string;
   description: string;
-  run_on: "local" | "remote";
+  run_on: "local";
   target_host: string;
   target_user: string;
   path_roots: Record<string, string>;
   notes: string[];
   secret_placeholders: string[];
-  source: "builtin" | "saved";
+  source: "builtin";
   editable: boolean;
-};
-
-export type SavedDeploymentProfileRequest = {
-  id?: string;
-  label: string;
-  description: string;
-  run_on: "local" | "remote";
-  target_host: string;
-  target_user: string;
-  path_roots: Record<string, string>;
-  notes: string[];
-  secret_placeholders: string[];
 };
 
 export type DeploymentSecretTemplate = {
@@ -151,7 +139,7 @@ export type DeploymentPlan = {
   commands: Array<{
     phase: "prepare" | "copy" | "activate" | "verify";
     label: string;
-    run_on: "local" | "remote";
+    run_on: "local";
     command: string;
   }>;
   secret_templates: DeploymentSecretTemplate[];
@@ -191,7 +179,7 @@ export type DeployExecuteResponse = {
   mode: "preview" | "bundle";
   profile: DeploymentProfile;
   bundle_root: string;
-  remote_touched: boolean;
+  host_touched: boolean;
   files_created: string[];
   steps: Array<{
     label: string;

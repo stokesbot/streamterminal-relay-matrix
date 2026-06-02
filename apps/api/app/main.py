@@ -16,7 +16,6 @@ from .schemas import (
     InstallResult,
     RelayConfig,
     RuntimeStatus,
-    SavedDeploymentProfileRequest,
     ServiceActionRequest,
     ServiceActionResult,
     ServiceLogsResponse,
@@ -124,36 +123,31 @@ def install_runtime() -> InstallResult:
 
 @app.get("/api/deploy/profiles", response_model=list[DeploymentProfile])
 def deploy_profiles() -> list[DeploymentProfile]:
-    return runtime.deployment_profiles(store.list_target_profiles())
-
-
-@app.post("/api/deploy/targets", response_model=DeploymentProfile)
-def save_deploy_target(request: SavedDeploymentProfileRequest) -> DeploymentProfile:
-    return store.save_target_profile(request)
+    return runtime.deployment_profiles()
 
 
 @app.get("/api/deploy/plan", response_model=DeploymentPlanResponse)
-def deploy_plan(profile_id: str = Query(default="local-dev")) -> DeploymentPlanResponse:
+def deploy_plan(profile_id: str = Query(default="local-system")) -> DeploymentPlanResponse:
     config = store.load()
     validation = validate_config(config)
     if not validation.valid:
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     try:
-        return runtime.deployment_plan(config, profile_id=profile_id, latest_revision=store.latest_revision(), custom_profiles=store.list_target_profiles())
+        return runtime.deployment_plan(config, profile_id=profile_id, latest_revision=store.latest_revision())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/deploy/audit", response_model=DeploymentAuditResponse)
-def deploy_audit(profile_id: str = Query(default="local-dev")) -> DeploymentAuditResponse:
+def deploy_audit(profile_id: str = Query(default="local-system")) -> DeploymentAuditResponse:
     config = store.load()
     validation = validate_config(config)
     if not validation.valid:
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     try:
-        return runtime.deployment_audit(config, profile_id=profile_id, latest_revision=store.latest_revision(), custom_profiles=store.list_target_profiles())
+        return runtime.deployment_audit(config, profile_id=profile_id, latest_revision=store.latest_revision())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -171,7 +165,6 @@ def deploy_execute(request: DeployExecuteRequest) -> DeployExecuteResponse:
             profile_id=request.profile_id,
             execute=request.execute,
             latest_revision=store.latest_revision(),
-            custom_profiles=store.list_target_profiles(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -208,10 +201,9 @@ def runtime_status() -> RuntimeStatus:
             "Draft/apply/rollback path now generates runtime artifacts locally",
             "Host diagnostics now probe local runtime binaries and command availability",
             "Runtime install staging and service-control APIs are now available",
-            "Deployment planning profiles now preview staged-to-target copy and activation steps",
-            "Safe deploy bundle execution now writes env-template-aware bundles without touching target hosts",
-            "Deployment audit now compares file checksums against the latest bundle for each profile",
-            "Saved target profiles now persist outside git-tracked deployment code",
+            "Deployment workflow is now local-host only",
+            "Safe local bundle execution writes env-template-aware bundles without touching other machines",
+            "Deployment audit compares file checksums against the latest local bundle",
         ],
     )
 

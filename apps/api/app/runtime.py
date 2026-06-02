@@ -82,8 +82,8 @@ class RuntimeAdapter:
     def relay_env_example(self, config: RelayConfig) -> str:
         return "\n".join(
             [
-                "# Copy to streamterminal-relay.env and replace placeholder values before live deployment.",
-                "# Keep the real env file out of git and set chmod 600 on the target host.",
+                "# Copy to streamterminal-relay.env and replace placeholder values before local activation.",
+                "# Keep the real env file out of git and set chmod 600 on the host.",
                 f"STM_CHANNEL_NAME={self._shell_escape(config.channel_name)}",
                 "STM_PRIMARY_INPUT_URL='REPLACE_WITH_PRIMARY_INPUT_URL'",
                 "STM_BACKUP_INPUT_URL='REPLACE_WITH_BACKUP_INPUT_URL'",
@@ -105,7 +105,7 @@ class RuntimeAdapter:
                 "STM_OUTPUT_URL": self._mask_url(config.output.url),
             },
             notes=[
-                "Generate the live env file on the target host from the example file.",
+                "Create the live env file locally from the example file.",
                 "Inject real URLs and stream keys outside the repository and outside committed artifacts.",
                 "Set file permissions to 600 and load it via systemd EnvironmentFile.",
             ],
@@ -153,19 +153,41 @@ class RuntimeAdapter:
             "WantedBy=multi-user.target\n"
         )
 
+    def local_profile(self) -> DeploymentProfile:
+        return DeploymentProfile(
+            id="local-system",
+            label="Local Linux host",
+            description="Install and operate the relay stack on the same machine where the control plane runs.",
+            run_on="local",
+            target_host="localhost",
+            target_user="current-user",
+            path_roots={
+                "config_dir": "/etc/streamterminal-relay-matrix",
+                "bin_dir": "/usr/local/bin",
+                "systemd_dir": "/etc/systemd/system",
+            },
+            notes=[
+                "This workflow is local-only: no SSH, rsync, or remote VPS copy steps are generated.",
+                "Use systemd on the same machine to run MediaMTX and the relay after install.",
+            ],
+            secret_placeholders=[
+                "Create streamterminal-relay.env from the example file locally and keep it outside git.",
+            ],
+            source="builtin",
+            editable=False,
+        )
+
     def preview_artifacts(
         self,
         config: RelayConfig,
         *,
         config_dir: str | None = None,
         bin_dir: str | None = None,
-        systemd_dir: str | None = None,
         root: Path | None = None,
     ) -> list[GeneratedArtifact]:
         root = root or self.runtime_dir
         config_dir = config_dir or "/etc/streamterminal-relay-matrix"
         bin_dir = bin_dir or "/usr/local/bin"
-        systemd_dir = systemd_dir or "/etc/systemd/system"
 
         return [
             GeneratedArtifact(
@@ -243,101 +265,26 @@ class RuntimeAdapter:
                 path.chmod(0o755)
         return installed
 
-    def deployment_profiles(self, custom_profiles: list[DeploymentProfile] | None = None) -> list[DeploymentProfile]:
-        profiles = [
-            DeploymentProfile(
-                id="local-dev",
-                label="Local development host",
-                description="Generate a safe local deploy bundle without touching privileged system paths.",
-                run_on="local",
-                target_host="localhost",
-                target_user="current-user",
-                path_roots={
-                    "config_dir": "/etc/streamterminal-relay-matrix",
-                    "bin_dir": "/usr/local/bin",
-                    "systemd_dir": "/etc/systemd/system",
-                },
-                notes=[
-                    "Bundle generation is safe: it writes only under apps/api/data/runtime/deploy-bundles/.",
-                    "Review generated files before any manual privileged install.",
-                ],
-                secret_placeholders=[
-                    "Create streamterminal-relay.env from the example file on the host and keep it outside git.",
-                ],
-                source="builtin",
-                editable=False,
-            ),
-            DeploymentProfile(
-                id="staging-vm",
-                label="Staging VM",
-                description="Generate a remote deployment bundle with rsync/ssh command previews for a staging relay host.",
-                run_on="remote",
-                target_host="relay-staging.example.internal",
-                target_user="relayops",
-                path_roots={
-                    "config_dir": "/etc/streamterminal-relay-matrix",
-                    "bin_dir": "/usr/local/bin",
-                    "systemd_dir": "/etc/systemd/system",
-                },
-                notes=[
-                    "Use a non-production relay VM first.",
-                    "Validate SSH access, sudo policy, and installed binaries before activation.",
-                ],
-                secret_placeholders=[
-                    "Inject real output endpoints via remote env/secrets, not by committing them into repo defaults.",
-                ],
-                source="builtin",
-                editable=False,
-            ),
-            DeploymentProfile(
-                id="production-vm",
-                label="Production VM",
-                description="Generate a controlled production deployment bundle with restart and verification command previews.",
-                run_on="remote",
-                target_host="relay-prod.example.internal",
-                target_user="relayops",
-                path_roots={
-                    "config_dir": "/etc/streamterminal-relay-matrix",
-                    "bin_dir": "/usr/local/bin",
-                    "systemd_dir": "/etc/systemd/system",
-                },
-                notes=[
-                    "Schedule around live traffic and encoder availability.",
-                    "Prepare rollback instructions and verify env-file secrets on-host immediately before activation.",
-                ],
-                secret_placeholders=[
-                    "Do not store production stream keys in repo-tracked files or chat transcripts.",
-                ],
-                source="builtin",
-                editable=False,
-            ),
-        ]
-        return profiles + (custom_profiles or [])
+    def deployment_profiles(self) -> list[DeploymentProfile]:
+        return [self.local_profile()]
 
-    def deployment_profile(
-        self,
-        profile_id: str,
-        custom_profiles: list[DeploymentProfile] | None = None,
-    ) -> DeploymentProfile:
-        for profile in self.deployment_profiles(custom_profiles):
-            if profile.id == profile_id:
-                return profile
-        raise ValueError(f"Unknown deployment profile: {profile_id}")
+    def deployment_profile(self, profile_id: str) -> DeploymentProfile:
+        profile = self.local_profile()
+        if profile.id != profile_id:
+            raise ValueError(f"Unknown deployment profile: {profile_id}")
+        return profile
 
     def deployment_plan(
         self,
         config: RelayConfig,
         profile_id: str,
         latest_revision: Any | None = None,
-        custom_profiles: list[DeploymentProfile] | None = None,
     ) -> DeploymentPlanResponse:
-        profile = self.deployment_profile(profile_id, custom_profiles)
+        profile = self.deployment_profile(profile_id)
         staged = self.install_artifacts(config)
-        files: list[DeploymentPlannedFile] = []
         config_dir = profile.path_roots["config_dir"]
         bin_dir = profile.path_roots["bin_dir"]
         systemd_dir = profile.path_roots["systemd_dir"]
-
         mapping = {
             "mediamtx.yml": f"{config_dir}/mediamtx.yml",
             "relay-command.sh": f"{bin_dir}/relay-command.sh",
@@ -346,6 +293,7 @@ class RuntimeAdapter:
             "stream-failover-relay.service": f"{systemd_dir}/stream-failover-relay.service",
         }
 
+        files: list[DeploymentPlannedFile] = []
         for artifact in staged:
             source_path = Path(artifact.path)
             files.append(
@@ -367,7 +315,7 @@ class RuntimeAdapter:
             files=files,
             commands=self._deployment_commands(profile, files, config_dir),
             secret_templates=[self.relay_secret_template(config, config_dir)],
-            warnings=self._deployment_warnings(config, profile),
+            warnings=self._deployment_warnings(config),
         )
 
     def deployment_audit(
@@ -375,9 +323,8 @@ class RuntimeAdapter:
         config: RelayConfig,
         profile_id: str,
         latest_revision: Any | None = None,
-        custom_profiles: list[DeploymentProfile] | None = None,
     ) -> DeploymentAuditResponse:
-        plan = self.deployment_plan(config, profile_id, latest_revision, custom_profiles)
+        plan = self.deployment_plan(config, profile_id, latest_revision)
         previous_bundle = self._latest_bundle_dir(plan.profile.id)
         previous_manifest = self._load_bundle_manifest(previous_bundle)
         previous_map = {
@@ -389,7 +336,6 @@ class RuntimeAdapter:
         changed = 0
         unchanged = 0
         new_files = 0
-
         for file in plan.files:
             sha256 = self._file_sha256(Path(file.source_path))
             previous_sha = previous_map.get(file.target_path)
@@ -434,9 +380,8 @@ class RuntimeAdapter:
         profile_id: str,
         execute: bool,
         latest_revision: Any | None = None,
-        custom_profiles: list[DeploymentProfile] | None = None,
     ) -> DeployExecuteResponse:
-        plan = self.deployment_plan(config, profile_id, latest_revision, custom_profiles)
+        plan = self.deployment_plan(config, profile_id, latest_revision)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         bundle_dir = self.bundle_root / f"{timestamp}-{plan.profile.id}"
 
@@ -447,13 +392,13 @@ class RuntimeAdapter:
                 mode="preview",
                 profile=plan.profile,
                 bundle_root=str(bundle_dir),
-                remote_touched=False,
+                host_touched=False,
                 files_created=[],
                 steps=[
                     DeploymentExecutionStep(
-                        label="Preview deploy bundle",
+                        label="Preview local install bundle",
                         status="preview",
-                        detail=f"Would create bundle under {bundle_dir} without touching any target host.",
+                        detail=f"Would create bundle under {bundle_dir} for this local host.",
                     ),
                     DeploymentExecutionStep(
                         label="Review env template",
@@ -462,7 +407,7 @@ class RuntimeAdapter:
                     ),
                 ],
                 warnings=plan.warnings,
-                next_actions=self._next_actions(plan.profile),
+                next_actions=self._next_actions(),
             )
 
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -503,7 +448,7 @@ class RuntimeAdapter:
         files_created.append(str(commands_script))
         steps.append(
             DeploymentExecutionStep(
-                label="Write command preview script",
+                label="Write local command preview script",
                 status="created",
                 detail=f"Created {commands_script}",
             )
@@ -557,11 +502,11 @@ class RuntimeAdapter:
             mode="bundle",
             profile=plan.profile,
             bundle_root=str(bundle_dir),
-            remote_touched=False,
+            host_touched=False,
             files_created=files_created,
             steps=steps,
             warnings=plan.warnings,
-            next_actions=self._next_actions(plan.profile),
+            next_actions=self._next_actions(),
         )
 
     def host_snapshot(self) -> dict[str, Any]:
@@ -572,8 +517,7 @@ class RuntimeAdapter:
             "ffprobe": ["ffprobe", "-version"],
             "journalctl": ["journalctl", "--version"],
             "systemctl": ["systemctl", "--version"],
-            "rsync": ["rsync", "--version"],
-            "ssh": ["ssh", "-V"],
+            "sudo": ["sudo", "--version"],
         }
         return {
             "runtime_dir": str(self.runtime_dir),
@@ -634,75 +578,69 @@ class RuntimeAdapter:
         }
 
     def _deployment_commands(self, profile: DeploymentProfile, files: list[DeploymentPlannedFile], config_dir: str) -> list[DeploymentCommand]:
-        commands: list[DeploymentCommand] = []
         env_example = f"{config_dir}/streamterminal-relay.env.example"
         env_live = f"{config_dir}/streamterminal-relay.env"
-
-        if profile.run_on == "local":
-            mkdirs = " ".join(self._shell_escape(profile.path_roots[key]) for key in ["config_dir", "bin_dir", "systemd_dir"])
-            commands.append(DeploymentCommand(phase="prepare", label="Create target directories", run_on="local", command=f"sudo mkdir -p {mkdirs}"))
-            for file in files:
-                mode = "0755" if file.name.endswith(".sh") else "0644"
-                commands.append(
-                    DeploymentCommand(
-                        phase="copy",
-                        label=f"Install {file.name}",
-                        run_on="local",
-                        command=f"sudo install -m {mode} {self._shell_escape(file.source_path)} {self._shell_escape(file.target_path)}",
-                    )
-                )
-            commands.extend(
-                [
-                    DeploymentCommand(phase="copy", label="Create live env file from example", run_on="local", command=f"sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}"),
-                    DeploymentCommand(phase="activate", label="Reload systemd", run_on="local", command="sudo systemctl daemon-reload"),
-                    DeploymentCommand(phase="activate", label="Restart services", run_on="local", command="sudo systemctl restart mediamtx.service stream-failover-relay.service"),
-                    DeploymentCommand(phase="verify", label="Check service state", run_on="local", command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager"),
-                ]
-            )
-            return commands
-
-        target = f"{profile.target_user}@{profile.target_host}"
-        commands.append(
+        mkdirs = " ".join(self._shell_escape(profile.path_roots[key]) for key in ["config_dir", "bin_dir", "systemd_dir"])
+        commands: list[DeploymentCommand] = [
             DeploymentCommand(
                 phase="prepare",
-                label="Create target directories over SSH",
-                run_on="remote",
-                command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo mkdir -p " + profile.path_roots["config_dir"] + " " + profile.path_roots["bin_dir"] + " " + profile.path_roots["systemd_dir"]),
+                label="Create local target directories",
+                run_on="local",
+                command=f"sudo mkdir -p {mkdirs}",
             )
-        )
+        ]
         for file in files:
+            mode = "0755" if file.name.endswith(".sh") else "0644"
             commands.append(
                 DeploymentCommand(
                     phase="copy",
-                    label=f"Copy {file.name}",
-                    run_on="remote",
-                    command="rsync -av " + self._shell_escape(file.source_path) + " " + self._shell_escape(f"{target}:{file.target_path}"),
+                    label=f"Install {file.name}",
+                    run_on="local",
+                    command=f"sudo install -m {mode} {self._shell_escape(file.source_path)} {self._shell_escape(file.target_path)}",
                 )
             )
         commands.extend(
             [
-                DeploymentCommand(phase="copy", label="Create remote env file from example", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape(f"sudo cp {env_example} {env_live} && sudo chmod 600 {env_live}")),
-                DeploymentCommand(phase="activate", label="Reload systemd on remote host", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl daemon-reload")),
-                DeploymentCommand(phase="activate", label="Restart remote services", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl restart mediamtx.service stream-failover-relay.service")),
-                DeploymentCommand(phase="verify", label="Verify remote service state", run_on="remote", command="ssh " + self._shell_escape(target) + " " + self._shell_escape("sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager")),
+                DeploymentCommand(
+                    phase="copy",
+                    label="Create live env file from example",
+                    run_on="local",
+                    command=f"sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}",
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label="Reload systemd",
+                    run_on="local",
+                    command="sudo systemctl daemon-reload",
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label="Restart local services",
+                    run_on="local",
+                    command="sudo systemctl restart mediamtx.service stream-failover-relay.service",
+                ),
+                DeploymentCommand(
+                    phase="verify",
+                    label="Check local service state",
+                    run_on="local",
+                    command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager",
+                ),
             ]
         )
         return commands
 
-    def _deployment_warnings(self, config: RelayConfig, profile: DeploymentProfile) -> list[str]:
+    def _deployment_warnings(self, config: RelayConfig) -> list[str]:
         warnings: list[str] = []
         if self._looks_sensitive_url(config.output.url):
             warnings.append("Output URL appears sensitive; keep the live output destination only in the on-host env file.")
-        if profile.id != "local-dev":
-            warnings.append("Remote deployment execution is still bundle-only in this prototype; review and run the generated commands manually.")
         if config.primary_input.protocol != config.backup_input.protocol:
             warnings.append("Mixed primary/backup protocols remain a failover risk and may need additional normalization.")
         if not config.auto_restart:
-            warnings.append("Auto-restart is disabled in the draft; review whether production should rely on systemd restart behavior.")
+            warnings.append("Auto-restart is disabled in the draft; review whether local systemd restart behavior should remain enabled.")
         return warnings
 
     def _commands_preview_script(self, plan: DeploymentPlanResponse) -> str:
-        lines = ["#!/usr/bin/env bash", "set -euo pipefail", "", "# Preview only. Review each command before running on a real host."]
+        lines = ["#!/usr/bin/env bash", "set -euo pipefail", "", "# Local install preview only. Review each command before running with sudo on this host."]
         current_phase = None
         for command in plan.commands:
             if command.phase != current_phase:
@@ -720,13 +658,13 @@ class RuntimeAdapter:
                 f"Profile: {plan.profile.label}",
                 f"Target: {plan.profile.target_user}@{plan.profile.target_host}",
                 "",
-                "This bundle is safe to generate: it does NOT connect to or modify any target host.",
-                "Review commands-preview.sh before running anything manually.",
+                "This bundle is local-only. It does NOT connect to any remote host.",
+                "Review commands-preview.sh before running anything manually with sudo on this machine.",
                 "",
                 "Secret/env handling:",
                 f"- Example file: {secret.example_path}",
                 f"- Live file:    {secret.live_path}",
-                "- Copy the example to the live path on the target host and replace placeholders there.",
+                "- Copy the example to the live path locally and replace placeholders there.",
                 "- Keep the live file out of git and set chmod 600.",
                 "",
                 "Masked current values:",
@@ -738,17 +676,11 @@ class RuntimeAdapter:
             ]
         )
 
-    def _next_actions(self, profile: DeploymentProfile) -> list[str]:
-        if profile.run_on == "local":
-            return [
-                "Inspect the generated bundle under apps/api/data/runtime/deploy-bundles/.",
-                "Copy streamterminal-relay.env.example to a real on-host env file and replace placeholders.",
-                "Run only the reviewed commands you trust with sudo on the actual host.",
-            ]
+    def _next_actions(self) -> list[str]:
         return [
-            "Inspect the generated bundle and commands-preview.sh locally first.",
-            "Provision the live env file with real secrets on the remote host outside git.",
-            "Run the reviewed rsync/ssh commands manually once SSH access and rollback steps are confirmed.",
+            "Inspect the generated bundle under apps/api/data/runtime/deploy-bundles/.",
+            "Copy streamterminal-relay.env.example to a real local env file and replace placeholders.",
+            "Run only the reviewed local commands you trust with sudo on this machine.",
         ]
 
     def _latest_bundle_dir(self, profile_id: str) -> Path | None:
