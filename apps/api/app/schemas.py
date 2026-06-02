@@ -1,9 +1,10 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 Protocol = Literal["rtmp", "srt", "rtsp", "udp", "file"]
 ConnectionMode = Literal["pull", "push", "listener", "caller"]
+IssueLevel = Literal["info", "warning", "error"]
 
 
 class StreamEndpoint(BaseModel):
@@ -25,13 +26,13 @@ class RelayConfig(BaseModel):
 
 
 class ValidationIssue(BaseModel):
-    level: Literal["info", "warning", "error"]
+    level: IssueLevel
     message: str
 
 
 class ValidationResult(BaseModel):
     valid: bool
-    issues: list[ValidationIssue] = []
+    issues: list[ValidationIssue] = Field(default_factory=list)
 
 
 class ServiceStatus(BaseModel):
@@ -46,4 +47,32 @@ class RuntimeStatus(BaseModel):
     backup_state: Literal["healthy", "down", "unknown"] = "unknown"
     output_state: Literal["connected", "disconnected", "unknown"] = "unknown"
     services: list[ServiceStatus]
-    recent_events: list[str] = []
+    recent_events: list[str] = Field(default_factory=list)
+
+
+class ConfigRevision(BaseModel):
+    version: int
+    status: Literal["draft", "applied", "rolled_back"]
+    payload: RelayConfig
+    created_at: str
+    note: str
+
+
+class ApplyResult(BaseModel):
+    ok: bool
+    version: int
+    note: str
+    artifacts: list[str] = Field(default_factory=list)
+
+
+class GeneratedArtifact(BaseModel):
+    name: str
+    path: str
+    content: str
+
+
+class DiagnosticsResponse(BaseModel):
+    draft_config: RelayConfig
+    latest_revision: ConfigRevision | None = None
+    generated_artifacts: list[GeneratedArtifact] = Field(default_factory=list)
+    environment: dict[str, Any] = Field(default_factory=dict)

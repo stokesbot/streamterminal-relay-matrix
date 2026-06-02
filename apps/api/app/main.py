@@ -1,14 +1,24 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .schemas import RelayConfig, RuntimeStatus, ServiceStatus, ValidationIssue, ValidationResult
+from .runtime import RuntimeAdapter
+from .schemas import (
+    ApplyResult,
+    DiagnosticsResponse,
+    RelayConfig,
+    RuntimeStatus,
+    ServiceStatus,
+    ValidationIssue,
+    ValidationResult,
+)
 from .storage import ConfigStore
 
 settings = get_settings()
 store = ConfigStore(settings.data_dir)
+runtime = RuntimeAdapter(store.runtime_dir)
 
 
 def validate_config(config: RelayConfig) -> ValidationResult:
@@ -43,6 +53,22 @@ def validate_config(config: RelayConfig) -> ValidationResult:
             ValidationIssue(
                 level="error",
                 message="Output must be enabled.",
+            )
+        )
+
+    if config.primary_input.protocol != config.backup_input.protocol:
+        issues.append(
+            ValidationIssue(
+                level="warning",
+                message="Primary and backup protocols differ. Real failover may need extra normalization logic.",
+            )
+        )
+
+    if not config.output.url.startswith(("rtmp://", "srt://", "rtsp://", "udp://", "file://")):
+        issues.append(
+            ValidationIssue(
+                level="error",
+                message="Output URL must include a supported protocol prefix.",
             )
         )
 
@@ -88,9 +114,63 @@ def post_validate(config: RelayConfig) -> ValidationResult:
     return validate_config(config)
 
 
+@app.post("/api/config/apply", response_model=ApplyResult)
+def apply_config() -> ApplyResult:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    artifacts = runtime.write_runtime_artifacts(config)
+    revision = store.create_revision(
+        config,
+        status="applied",
+        note="Generated local runtime artifacts for the current draft.",
+    )
+
+    return ApplyResult(
+        ok=True,
+        version=revision.version,
+        note=revision.note,
+        artifacts=[artifact.path for artifact in artifacts],
+    )
+
+
+@app.post("/api/config/rollback", response_model=ApplyResult)
+def rollback_config() -> ApplyResult:
+    revisions = store.list_revisions()
+    if len(revisions) < 2:
+        raise HTTPException(status_code=400, detail="No previous applied revision available.")
+
+    previous = revisions[-2]
+    store.save(previous.payload)
+    artifacts = runtime.write_runtime_artifacts(previous.payload)
+    rollback_revision = store.mark_rollback(
+        previous.payload,
+        note=f"Rolled back to revision {previous.version}.",
+    )
+
+    return ApplyResult(
+        ok=True,
+        version=rollback_revision.version,
+        note=rollback_revision.note,
+        artifacts=[artifact.path for artifact in artifacts],
+    )
+
+
 @app.get("/api/runtime/status", response_model=RuntimeStatus)
 def runtime_status() -> RuntimeStatus:
     config = store.load()
+    latest_revision = store.latest_revision()
+    host = runtime.host_snapshot()
+    mediamtx_tool = host["tools"]["mediamtx"]
+    relay_tool = host["tools"]["stream-failover-relay"]
+
+    status_detail = (
+        f"Draft applied in revision {latest_revision.version}"
+        if latest_revision
+        else "No applied revision yet"
+    )
 
     return RuntimeStatus(
         active_source="primary",
@@ -100,17 +180,51 @@ def runtime_status() -> RuntimeStatus:
         services=[
             ServiceStatus(
                 name="mediamtx",
-                status="running" if config.mediamtx_enabled else "stopped",
-                detail="Prototype status stub",
+                status=(
+                    "running"
+                    if config.mediamtx_enabled and mediamtx_tool.get("available")
+                    else "stopped"
+                ),
+                detail=(
+                    f"{status_detail}; binary at {mediamtx_tool.get('path')}"
+                    if mediamtx_tool.get("available")
+                    else f"{status_detail}; mediamtx binary not found on host"
+                ),
             ),
             ServiceStatus(
                 name="stream-failover-relay",
-                status="running" if config.relay_enabled else "stopped",
-                detail="Prototype status stub",
+                status=(
+                    "running"
+                    if config.relay_enabled and relay_tool.get("available")
+                    else "stopped"
+                ),
+                detail=(
+                    f"Relay binary at {relay_tool.get('path')}"
+                    if relay_tool.get("available")
+                    else "Relay binary not found on host"
+                ),
             ),
         ],
         recent_events=[
-            "Initial scaffold online",
-            "Runtime integration will replace these mocked events in the next phase",
+            "Prototype scaffold online",
+            "Draft/apply/rollback path now generates runtime artifacts locally",
+            "Host diagnostics now probe local runtime binaries and command availability",
         ],
+    )
+
+
+@app.get("/api/diagnostics", response_model=DiagnosticsResponse)
+def diagnostics() -> DiagnosticsResponse:
+    config = store.load()
+    return DiagnosticsResponse(
+        draft_config=config,
+        latest_revision=store.latest_revision(),
+        generated_artifacts=runtime.preview_artifacts(config),
+        environment={
+            "data_dir": settings.data_dir,
+            "allowed_origins": settings.allowed_origins,
+            "api_host": settings.api_host,
+            "api_port": settings.api_port,
+            "host": runtime.host_snapshot(),
+        },
     )

@@ -75,7 +75,11 @@ http://127.0.0.1:3000
 - configuration page
 - backend draft config load/save
 - backend config validation endpoint
-- mocked runtime status endpoint
+- backend apply / rollback endpoints
+- generated MediaMTX and relay runtime artifacts
+- generated systemd unit templates for both runtime services
+- diagnostics endpoint with template previews and host binary probing
+- runtime status endpoint backed by real local command availability checks
 - dark operator UI scaffold
 
 ## Documentation

@@ -12,5 +12,9 @@ __pycache__/
 .env
 .env.local
 
+# Runtime/generated state
+apps/api/data/revisions.json
+apps/api/data/runtime/
+
 # OS
 .DS_Store
