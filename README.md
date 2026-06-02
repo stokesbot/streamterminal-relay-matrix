@@ -71,11 +71,11 @@ http://127.0.0.1:3000
 
 ### Frontend smoke tests
 
-The deploy UI now has Playwright smoke coverage with mocked local deploy API responses, so the browser tests stay local-safe and do not mutate `/etc`, `/usr/local/bin`, or systemd state.
+The deploy, config, and diagnostics pages now have Playwright smoke coverage that drives the real FastAPI backend running in a temp data dir with a fake `sudo`/`systemctl`/`mediamtx`/`stream-failover-relay` on a sandboxed `PATH`. The browser tests therefore exercise a real end-to-end flow without touching `/etc`, `/usr/local/bin`, or systemd on the host.
 
 ```bash
 cd apps/web
-npm run test:e2e -- tests/deploy.spec.ts
+npm run test:e2e
 ```
 
 ## Current prototype features

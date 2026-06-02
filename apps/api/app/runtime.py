@@ -166,6 +166,15 @@ class RuntimeAdapter:
         )
 
     def local_profile(self) -> DeploymentProfile:
+        host_root = os.environ.get("STM_TEST_HOST_ROOT")
+        if host_root:
+            config_dir = f"{host_root}/etc/streamterminal-relay-matrix"
+            bin_dir = f"{host_root}/usr/local/bin"
+            systemd_dir = f"{host_root}/etc/systemd/system"
+        else:
+            config_dir = "/etc/streamterminal-relay-matrix"
+            bin_dir = "/usr/local/bin"
+            systemd_dir = "/etc/systemd/system"
         return DeploymentProfile(
             id="local-system",
             label="Local Linux host",
@@ -174,9 +183,9 @@ class RuntimeAdapter:
             target_host="localhost",
             target_user="current-user",
             path_roots={
-                "config_dir": "/etc/streamterminal-relay-matrix",
-                "bin_dir": "/usr/local/bin",
-                "systemd_dir": "/etc/systemd/system",
+                "config_dir": config_dir,
+                "bin_dir": bin_dir,
+                "systemd_dir": systemd_dir,
             },
             notes=[
                 "This workflow is local-only: no SSH, rsync, or remote VPS copy steps are generated.",
