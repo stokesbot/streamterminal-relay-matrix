@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from .schemas import (
     DeployExecuteResponse,
     DeploymentAuditResponse,
     DeploymentPlanResponse,
+    DeploymentPreflightResponse,
     DeploymentProfile,
     DiagnosticsResponse,
     InstallResult,
@@ -139,6 +141,19 @@ def deploy_plan(profile_id: str = Query(default="local-system")) -> DeploymentPl
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/deploy/preflight", response_model=DeploymentPreflightResponse)
+def deploy_preflight(profile_id: str = Query(default="local-system")) -> DeploymentPreflightResponse:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    try:
+        return runtime.deployment_preflight(config, profile_id=profile_id, latest_revision=store.latest_revision())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/deploy/audit", response_model=DeploymentAuditResponse)
 def deploy_audit(profile_id: str = Query(default="local-system")) -> DeploymentAuditResponse:
     config = store.load()
@@ -160,14 +175,25 @@ def deploy_execute(request: DeployExecuteRequest) -> DeployExecuteResponse:
         raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
 
     try:
-        return runtime.execute_deployment_bundle(
+        response = runtime.execute_deployment_bundle(
             config,
             profile_id=request.profile_id,
             execute=request.execute,
             latest_revision=store.latest_revision(),
+            action=request.action,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    resolved_action = request.action or ("bundle" if request.execute else "preview")
+    if response.ok and response.host_touched and resolved_action == "apply":
+        store.create_revision(config, status="applied", note=f"Applied local deployment bundle on host via profile {request.profile_id}.")
+    elif response.ok and response.host_touched and resolved_action == "rollback":
+        manifest = runtime._load_bundle_manifest(Path(response.bundle_root))
+        restored_config = RelayConfig.model_validate(manifest.get("config") or config.model_dump(mode="json"))
+        store.save(restored_config)
+        store.mark_rollback(restored_config, note=f"Rolled back local host deployment via profile {request.profile_id}.")
+    return response
 
 
 @app.get("/api/runtime/status", response_model=RuntimeStatus)

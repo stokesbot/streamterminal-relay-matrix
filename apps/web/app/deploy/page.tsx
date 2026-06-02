@@ -9,6 +9,7 @@ import {
   type DeployExecuteResponse,
   type DeploymentAudit,
   type DeploymentPlan,
+  type DeploymentPreflight,
   type DeploymentProfile,
 } from "@/lib/api";
 
@@ -21,12 +22,16 @@ const phases: Array<DeploymentPlan["commands"][number]["phase"]> = [
 
 export default function DeployPage() {
   const [profile, setProfile] = useState<DeploymentProfile | null>(null);
+  const [preflight, setPreflight] = useState<DeploymentPreflight | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
   const [audit, setAudit] = useState<DeploymentAudit | null>(null);
   const [execution, setExecution] = useState<DeployExecuteResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [runningPreflight, setRunningPreflight] = useState(false);
   const [runningPreview, setRunningPreview] = useState(false);
+  const [runningApply, setRunningApply] = useState(false);
+  const [runningRollback, setRunningRollback] = useState(false);
   const [runningBundle, setRunningBundle] = useState(false);
 
   useEffect(() => {
@@ -35,13 +40,15 @@ export default function DeployPage() {
     async function loadDeploymentData() {
       setLoading(true);
       try {
-        const [profilesPayload, planPayload, auditPayload] = await Promise.all([
+        const [profilesPayload, preflightPayload, planPayload, auditPayload] = await Promise.all([
           fetchJson<DeploymentProfile[]>("/api/deploy/profiles"),
+          fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
           fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
           fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
         ]);
         if (!cancelled) {
           setProfile(profilesPayload[0] ?? null);
+          setPreflight(preflightPayload);
           setPlan(planPayload);
           setAudit(auditPayload);
           setExecution(null);
@@ -75,37 +82,61 @@ export default function DeployPage() {
     }));
   }, [plan]);
 
-  async function refreshPlanAndAudit() {
-    const [planPayload, auditPayload] = await Promise.all([
+  async function refreshDeploymentState() {
+    const [preflightPayload, planPayload, auditPayload] = await Promise.all([
+      fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
       fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
       fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
     ]);
+    setPreflight(preflightPayload);
     setPlan(planPayload);
     setAudit(auditPayload);
   }
 
-  async function runExecution(execute: boolean) {
-    if (execute) {
-      setRunningBundle(true);
-    } else {
+  async function runPreflight() {
+    setRunningPreflight(true);
+    try {
+      const payload = await fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system");
+      setPreflight(payload);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to run local preflight.");
+    } finally {
+      setRunningPreflight(false);
+    }
+  }
+
+  async function runExecution(action: "preview" | "bundle" | "apply" | "rollback") {
+    if (action === "preview") {
       setRunningPreview(true);
+    } else if (action === "bundle") {
+      setRunningBundle(true);
+    } else if (action === "apply") {
+      setRunningApply(true);
+    } else {
+      setRunningRollback(true);
     }
 
     try {
       const payload = await sendJson<DeployExecuteResponse>("/api/deploy/execute", "POST", {
         profile_id: "local-system",
-        execute,
+        execute: action !== "preview",
+        action,
       });
       setExecution(payload);
-      await refreshPlanAndAudit();
+      await refreshDeploymentState();
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run local deployment action.");
     } finally {
-      if (execute) {
-        setRunningBundle(false);
-      } else {
+      if (action === "preview") {
         setRunningPreview(false);
+      } else if (action === "bundle") {
+        setRunningBundle(false);
+      } else if (action === "apply") {
+        setRunningApply(false);
+      } else {
+        setRunningRollback(false);
       }
     }
   }
@@ -118,7 +149,7 @@ export default function DeployPage() {
             <p className="text-xs uppercase tracking-[0.3em] text-sky-300">Local install workflow</p>
             <h1 className="mt-2 text-3xl font-semibold">Install and operate on this Linux host</h1>
             <p className="mt-3 max-w-3xl text-sm text-slate-400">
-              This page is local-only. It prepares configs, env templates, systemd units, audit hashes, and local sudo command previews for the same machine where the control plane runs.
+              This page is local-only. It runs preflight checks, prepares configs, env templates, systemd units, audit hashes, and can now apply or roll back the relay stack directly on the same Linux machine where the control plane runs.
             </p>
           </div>
           <div className="flex gap-3">
@@ -146,16 +177,40 @@ export default function DeployPage() {
               <div className="flex flex-wrap gap-3">
                 <button
                   className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={runningPreflight}
+                  onClick={() => void runPreflight()}
+                  type="button"
+                >
+                  {runningPreflight ? "Checking..." : "Run local preflight"}
+                </button>
+                <button
+                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={runningPreview}
-                  onClick={() => void runExecution(false)}
+                  onClick={() => void runExecution("preview")}
                   type="button"
                 >
                   {runningPreview ? "Previewing..." : "Preview local apply"}
                 </button>
                 <button
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={runningApply}
+                  onClick={() => void runExecution("apply")}
+                  type="button"
+                >
+                  {runningApply ? "Applying..." : "True local apply"}
+                </button>
+                <button
+                  className="rounded-lg border border-amber-700 px-4 py-2 text-sm text-amber-100 hover:bg-amber-950/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={runningRollback}
+                  onClick={() => void runExecution("rollback")}
+                  type="button"
+                >
+                  {runningRollback ? "Rolling back..." : "Local rollback"}
+                </button>
+                <button
                   className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={runningBundle}
-                  onClick={() => void runExecution(true)}
+                  onClick={() => void runExecution("bundle")}
                   type="button"
                 >
                   {runningBundle ? "Generating bundle..." : "Generate local install bundle"}
@@ -167,9 +222,9 @@ export default function DeployPage() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="text-xs uppercase tracking-[0.2em] text-slate-400">What changed</div>
             <ul className="mt-4 space-y-3 text-sm text-slate-300">
-              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Removed remote/VPS deployment assumptions from this workflow.</li>
-              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">All command previews now target the local host only.</li>
-              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Audit history compares local bundles generated for this machine.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Preflight now checks sudo, systemd, required binaries, host paths, and rollback readiness on this machine.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">True local apply can install into /etc and /usr/local/bin, reload systemd, and change service state automatically.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Rollback now restores the previous applied local bundle instead of just writing another safe preview package.</li>
             </ul>
           </div>
         </section>
@@ -186,13 +241,57 @@ export default function DeployPage() {
           </section>
         ) : null}
 
+        {preflight ? (
+          <section className={`rounded-2xl border p-6 ${preflight.summary.ok ? "border-emerald-900 bg-emerald-950/20" : "border-amber-900 bg-amber-950/20"}`}>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Local preflight</h2>
+                <p className="mt-2 text-sm text-slate-300">
+                  Verify that this host can perform a true local apply without any SSH or remote-copy steps.
+                </p>
+                <p className="mt-2 text-xs text-slate-500">Generated at {preflight.generated_at}</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <AuditStat label="Ready" value={preflight.summary.ok ? "yes" : "no"} />
+                <AuditStat label="Pass" value={String(preflight.summary.pass_count)} />
+                <AuditStat label="Warn" value={String(preflight.summary.warn_count)} />
+                <AuditStat label="Fail" value={String(preflight.summary.fail_count)} />
+              </div>
+            </div>
+            <div className="mt-5 grid gap-3 xl:grid-cols-2">
+              {preflight.checks.map((check) => (
+                <div key={`${check.name}-${check.detail}`} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="font-medium text-slate-100">{check.name}</div>
+                    <span className={`rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] ${check.status === "pass" ? "bg-emerald-950 text-emerald-200" : check.status === "warn" ? "bg-amber-950 text-amber-200" : "bg-rose-950 text-rose-200"}`}>
+                      {check.status}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-sm text-slate-300">{check.detail}</div>
+                  {check.command ? <pre className="mt-3 whitespace-pre-wrap text-xs text-slate-500">{check.command}</pre> : null}
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         {execution ? (
           <section className="rounded-2xl border border-emerald-900 bg-emerald-950/30 p-6">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Local execution result</p>
                 <h2 className="mt-2 text-xl font-semibold text-slate-100">
-                  {execution.executed ? "Bundle written locally" : "Preview generated"}
+                  {execution.mode === "preview"
+                    ? "Preview generated"
+                    : execution.mode === "bundle"
+                      ? "Bundle written locally"
+                      : execution.mode === "apply"
+                        ? execution.ok
+                          ? "True local apply completed"
+                          : "True local apply reported failures"
+                        : execution.ok
+                          ? "Local rollback completed"
+                          : "Local rollback reported failures"}
                 </h2>
                 <p className="mt-2 text-sm text-slate-300">Bundle root: {execution.bundle_root}</p>
                 <p className="mt-1 text-sm text-slate-400">Host touched: {execution.host_touched ? "yes" : "no"}</p>

@@ -74,9 +74,9 @@ http://127.0.0.1:3000
 - dashboard shell
 - configuration page
 - diagnostics page with artifact previews, host tool probes, and systemd unit state
-- local install planning page with host-target mapping, command previews, and rollout notes
+- local install planning page with host-target mapping, command previews, rollout notes, and host preflight results
 - deployment audit view with file checksums, changed/new/unchanged summaries, and latest-bundle comparison
-- safe local execution page actions for preview mode and local bundle generation
+- true local execution page actions for preflight, preview, bundle generation, host apply, and rollback
 - backend draft config load/save
 - backend config validation endpoint
 - backend apply / rollback endpoints
@@ -86,7 +86,8 @@ http://127.0.0.1:3000
 - staged local install layout under `apps/api/data/runtime/install-root/`
 - local deployment profile API and staged-to-target rollout plan endpoint
 - deployment audit endpoint backed by per-bundle manifests and sha256 comparison
-- safe local bundle execution endpoint that writes reviewed artifacts under `apps/api/data/runtime/deploy-bundles/`
+- local preflight endpoint for sudo/systemd/binary/path/rollback readiness checks
+- local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
 - UI controls for apply / stage-install / service actions / log fetch
@@ -119,4 +120,4 @@ Design the data model so multi-channel support can be added later.
 
 ## Status
 
-Prototype scaffold complete. Runtime integration, service controls, diagnostics, local install planning, safe local bundle generation, and deployment audits are now wired. The deploy workflow is intentionally local-host only.
+Prototype scaffold complete. Runtime integration, service controls, diagnostics, local install planning, local preflight, true local apply/rollback flow, safe local bundle generation, and deployment audits are now wired. The deploy workflow is intentionally local-host only.

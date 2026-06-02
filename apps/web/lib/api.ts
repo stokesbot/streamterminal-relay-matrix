@@ -118,6 +118,30 @@ export type DeploymentSecretTemplate = {
   notes: string[];
 };
 
+export type DeploymentPreflight = {
+  profile: DeploymentProfile;
+  generated_at: string;
+  latest_revision?: {
+    version: number;
+    status: string;
+    created_at: string;
+    note: string;
+  } | null;
+  summary: {
+    ok: boolean;
+    pass_count: number;
+    warn_count: number;
+    fail_count: number;
+  };
+  checks: Array<{
+    name: string;
+    status: "pass" | "warn" | "fail";
+    detail: string;
+    command?: string | null;
+  }>;
+  warnings: string[];
+};
+
 export type DeploymentPlan = {
   profile: DeploymentProfile;
   staged_root: string;
@@ -176,14 +200,14 @@ export type DeploymentAudit = {
 export type DeployExecuteResponse = {
   ok: boolean;
   executed: boolean;
-  mode: "preview" | "bundle";
+  mode: "preview" | "bundle" | "apply" | "rollback";
   profile: DeploymentProfile;
   bundle_root: string;
   host_touched: boolean;
   files_created: string[];
   steps: Array<{
     label: string;
-    status: "preview" | "created" | "skipped";
+    status: "preview" | "created" | "skipped" | "executed" | "failed";
     detail: string;
   }>;
   warnings: string[];

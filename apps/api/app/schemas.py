@@ -10,7 +10,9 @@ ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-
 DeploymentProfileId = str
 DeploymentRunOn = Literal["local"]
 DeploymentPhase = Literal["prepare", "copy", "activate", "verify"]
-DeploymentExecutionMode = Literal["preview", "bundle"]
+DeploymentExecutionMode = Literal["preview", "bundle", "apply", "rollback"]
+DeploymentExecutionAction = Literal["preview", "bundle", "apply", "rollback"]
+DeploymentStepStatus = Literal["preview", "created", "skipped", "executed", "failed"]
 DeploymentProfileSource = Literal["builtin"]
 
 
@@ -161,14 +163,38 @@ class DeploymentPlanResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class DeploymentPreflightCheck(BaseModel):
+    name: str
+    status: Literal["pass", "warn", "fail"]
+    detail: str
+    command: str | None = None
+
+
+class DeploymentPreflightSummary(BaseModel):
+    ok: bool
+    pass_count: int
+    warn_count: int
+    fail_count: int
+
+
+class DeploymentPreflightResponse(BaseModel):
+    profile: DeploymentProfile
+    generated_at: str
+    latest_revision: ConfigRevision | None = None
+    summary: DeploymentPreflightSummary
+    checks: list[DeploymentPreflightCheck] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DeployExecuteRequest(BaseModel):
     profile_id: DeploymentProfileId = "local-system"
     execute: bool = False
+    action: DeploymentExecutionAction | None = None
 
 
 class DeploymentExecutionStep(BaseModel):
     label: str
-    status: Literal["preview", "created", "skipped"]
+    status: DeploymentStepStatus
     detail: str
 
 

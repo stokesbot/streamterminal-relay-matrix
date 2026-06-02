@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -17,6 +18,9 @@ from .schemas import (
     DeploymentExecutionStep,
     DeploymentPlanResponse,
     DeploymentPlannedFile,
+    DeploymentPreflightCheck,
+    DeploymentPreflightResponse,
+    DeploymentPreflightSummary,
     DeploymentProfile,
     DeploymentSecretTemplate,
     GeneratedArtifact,
@@ -313,8 +317,130 @@ class RuntimeAdapter:
             generated_at=datetime.now(UTC).isoformat(),
             latest_revision=latest_revision,
             files=files,
-            commands=self._deployment_commands(profile, files, config_dir),
+            commands=self._deployment_commands(profile, files, config),
             secret_templates=[self.relay_secret_template(config, config_dir)],
+            warnings=self._deployment_warnings(config),
+        )
+
+    def deployment_preflight(
+        self,
+        config: RelayConfig,
+        profile_id: str,
+        latest_revision: Any | None = None,
+    ) -> DeploymentPreflightResponse:
+        profile = self.deployment_profile(profile_id)
+        checks: list[DeploymentPreflightCheck] = []
+
+        sudo_available = shutil.which("sudo") is not None
+        sudo_probe = self._run_command(["sudo", "-n", "true"]) if sudo_available else {"ok": False, "stderr": "sudo not found"}
+        checks.append(
+            DeploymentPreflightCheck(
+                name="Non-interactive sudo",
+                status="pass" if sudo_probe.get("ok") else "fail",
+                detail="The API can escalate locally without prompting." if sudo_probe.get("ok") else "Local apply needs passwordless sudo (sudo -n true).",
+                command="sudo -n true",
+            )
+        )
+
+        systemctl_path = shutil.which("systemctl")
+        if not systemctl_path:
+            checks.append(
+                DeploymentPreflightCheck(
+                    name="systemd available",
+                    status="fail",
+                    detail="systemctl is not available on this host.",
+                    command="systemctl --version",
+                )
+            )
+        else:
+            system_running = self._run_command([systemctl_path, "is-system-running"])
+            state = (system_running.get("stdout") or system_running.get("stderr") or "").strip() or "unknown"
+            status = "pass" if system_running.get("ok") else ("warn" if state in {"degraded", "starting"} else "fail")
+            checks.append(
+                DeploymentPreflightCheck(
+                    name="systemd runtime state",
+                    status=status,
+                    detail=f"systemd reports '{state}'.",
+                    command="systemctl is-system-running",
+                )
+            )
+
+        for name, enabled, binary in [
+            ("MediaMTX binary", config.mediamtx_enabled, "mediamtx"),
+            ("stream-failover-relay binary", config.relay_enabled, "stream-failover-relay"),
+        ]:
+            resolved = shutil.which(binary)
+            if resolved:
+                checks.append(
+                    DeploymentPreflightCheck(
+                        name=name,
+                        status="pass",
+                        detail=f"Resolved to {resolved}.",
+                        command=f"command -v {binary}",
+                    )
+                )
+            else:
+                checks.append(
+                    DeploymentPreflightCheck(
+                        name=name,
+                        status="fail" if enabled else "warn",
+                        detail=(
+                            f"{binary} is required for the currently enabled service."
+                            if enabled
+                            else f"{binary} is not installed, but the related service is disabled in the draft."
+                        ),
+                        command=f"command -v {binary}",
+                    )
+                )
+
+        for key, target in profile.path_roots.items():
+            exists = Path(target).exists()
+            writable = Path(target).exists() and Path(target).is_dir() and os.access(target, os.W_OK)
+            if writable:
+                status = "pass"
+                detail = f"{target} already exists and is writable by the current process."
+            elif sudo_probe.get("ok"):
+                status = "pass"
+                detail = f"{target} will be created or managed locally via sudo."
+            else:
+                status = "fail"
+                detail = f"{target} needs elevated local write access."
+            checks.append(
+                DeploymentPreflightCheck(
+                    name=f"Host path: {key}",
+                    status=status,
+                    detail=detail,
+                    command=f"test -d {target}",
+                )
+            )
+
+        previous_bundle = self._previous_applied_bundle(profile.id)
+        checks.append(
+            DeploymentPreflightCheck(
+                name="Rollback source available",
+                status="pass" if previous_bundle else "warn",
+                detail=(
+                    f"Previous applied bundle available at {previous_bundle}."
+                    if previous_bundle
+                    else "No earlier applied local bundle exists yet; the first true apply will not have a rollback target."
+                ),
+            )
+        )
+
+        pass_count = sum(1 for check in checks if check.status == "pass")
+        warn_count = sum(1 for check in checks if check.status == "warn")
+        fail_count = sum(1 for check in checks if check.status == "fail")
+        return DeploymentPreflightResponse(
+            profile=profile,
+            generated_at=datetime.now(UTC).isoformat(),
+            latest_revision=latest_revision,
+            summary=DeploymentPreflightSummary(
+                ok=fail_count == 0,
+                pass_count=pass_count,
+                warn_count=warn_count,
+                fail_count=fail_count,
+            ),
+            checks=checks,
             warnings=self._deployment_warnings(config),
         )
 
@@ -380,12 +506,14 @@ class RuntimeAdapter:
         profile_id: str,
         execute: bool,
         latest_revision: Any | None = None,
+        action: str | None = None,
     ) -> DeployExecuteResponse:
+        selected_action = self._resolve_deployment_action(action=action, execute=execute)
         plan = self.deployment_plan(config, profile_id, latest_revision)
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         bundle_dir = self.bundle_root / f"{timestamp}-{plan.profile.id}"
 
-        if not execute:
+        if selected_action == "preview":
             return DeployExecuteResponse(
                 ok=True,
                 executed=False,
@@ -396,117 +524,92 @@ class RuntimeAdapter:
                 files_created=[],
                 steps=[
                     DeploymentExecutionStep(
-                        label="Preview local install bundle",
+                        label="Preview true local apply",
                         status="preview",
-                        detail=f"Would create bundle under {bundle_dir} for this local host.",
+                        detail=f"Would write host files and manage local services from bundle {bundle_dir}.",
                     ),
                     DeploymentExecutionStep(
-                        label="Review env template",
+                        label="Review env handling",
                         status="preview",
-                        detail="Would include a placeholder-only env example and masked current values report.",
+                        detail="Would preserve an existing live env file and only seed it from the example when missing.",
                     ),
                 ],
                 warnings=plan.warnings,
-                next_actions=self._next_actions(),
+                next_actions=self._next_actions("preview", ok=True),
+            )
+
+        if selected_action == "rollback":
+            source_bundle = self._previous_applied_bundle(plan.profile.id)
+            if not source_bundle:
+                raise ValueError("No previous applied local bundle is available for rollback.")
+            source_manifest = self._load_bundle_manifest(source_bundle)
+            source_config = RelayConfig.model_validate(source_manifest.get("config") or config.model_dump(mode="json"))
+            plan = self.deployment_plan(source_config, profile_id, latest_revision)
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            files_created, bundle_steps, manifest_files = self._copy_bundle_rootfs(plan, bundle_dir, source_bundle)
+            host_steps, ok = self._apply_bundle_to_host(plan, bundle_dir, source_config)
+            files_created.extend(self._write_bundle_metadata(
+                plan=plan,
+                bundle_dir=bundle_dir,
+                files=manifest_files,
+                mode="rollback",
+                config_snapshot=source_config,
+                source_bundle=source_bundle,
+                host_touched=True,
+                success=ok,
+            ))
+            return DeployExecuteResponse(
+                ok=ok,
+                executed=True,
+                mode="rollback",
+                profile=plan.profile,
+                bundle_root=str(bundle_dir),
+                host_touched=True,
+                files_created=files_created,
+                steps=bundle_steps + host_steps,
+                warnings=plan.warnings,
+                next_actions=self._next_actions("rollback", ok=ok),
             )
 
         bundle_dir.mkdir(parents=True, exist_ok=True)
-        rootfs_dir = bundle_dir / "rootfs"
-        rootfs_dir.mkdir(parents=True, exist_ok=True)
-        files_created: list[str] = []
-        steps: list[DeploymentExecutionStep] = []
-        manifest_files: list[dict[str, Any]] = []
+        files_created, bundle_steps, manifest_files = self._write_bundle_rootfs(plan, bundle_dir)
+        files_created.extend(self._write_bundle_metadata(
+            plan=plan,
+            bundle_dir=bundle_dir,
+            files=manifest_files,
+            mode=selected_action,
+            config_snapshot=config,
+            host_touched=selected_action == "apply",
+            success=selected_action != "apply",
+        ))
 
-        for file in plan.files:
-            target = rootfs_dir / file.target_path.lstrip("/")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source = Path(file.source_path)
-            target.write_text(source.read_text())
-            if target.suffix == ".sh":
-                target.chmod(0o755)
-            files_created.append(str(target))
-            manifest_files.append(
-                {
-                    "name": file.name,
-                    "source_path": file.source_path,
-                    "target_path": file.target_path,
-                    "bytes": file.bytes,
-                    "sha256": self._file_sha256(source),
-                }
-            )
-            steps.append(
-                DeploymentExecutionStep(
-                    label=f"Bundle {file.name}",
-                    status="created",
-                    detail=f"Created {target}",
-                )
+        if selected_action == "bundle":
+            return DeployExecuteResponse(
+                ok=True,
+                executed=True,
+                mode="bundle",
+                profile=plan.profile,
+                bundle_root=str(bundle_dir),
+                host_touched=False,
+                files_created=files_created,
+                steps=bundle_steps,
+                warnings=plan.warnings,
+                next_actions=self._next_actions("bundle", ok=True),
             )
 
-        commands_script = bundle_dir / "commands-preview.sh"
-        commands_script.write_text(self._commands_preview_script(plan))
-        commands_script.chmod(0o755)
-        files_created.append(str(commands_script))
-        steps.append(
-            DeploymentExecutionStep(
-                label="Write local command preview script",
-                status="created",
-                detail=f"Created {commands_script}",
-            )
-        )
-
-        secret_report = bundle_dir / "secret-template-report.json"
-        secret_report.write_text(json.dumps([item.model_dump(mode="json") for item in plan.secret_templates], indent=2))
-        files_created.append(str(secret_report))
-        steps.append(
-            DeploymentExecutionStep(
-                label="Write secret template report",
-                status="created",
-                detail=f"Created {secret_report}",
-            )
-        )
-
-        manifest = bundle_dir / "deploy-manifest.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "profile_id": plan.profile.id,
-                    "generated_at": plan.generated_at,
-                    "files": manifest_files,
-                },
-                indent=2,
-            )
-        )
-        files_created.append(str(manifest))
-        steps.append(
-            DeploymentExecutionStep(
-                label="Write deploy manifest",
-                status="created",
-                detail=f"Created {manifest}",
-            )
-        )
-
-        bundle_readme = bundle_dir / "README.txt"
-        bundle_readme.write_text(self._bundle_readme(plan))
-        files_created.append(str(bundle_readme))
-        steps.append(
-            DeploymentExecutionStep(
-                label="Write bundle README",
-                status="created",
-                detail=f"Created {bundle_readme}",
-            )
-        )
-
+        host_steps, ok = self._apply_bundle_to_host(plan, bundle_dir, config)
+        self._update_bundle_manifest(bundle_dir, host_touched=True, success=ok)
         return DeployExecuteResponse(
-            ok=True,
+            ok=ok,
             executed=True,
-            mode="bundle",
+            mode="apply",
             profile=plan.profile,
             bundle_root=str(bundle_dir),
-            host_touched=False,
+            host_touched=True,
             files_created=files_created,
-            steps=steps,
+            steps=bundle_steps + host_steps,
             warnings=plan.warnings,
-            next_actions=self._next_actions(),
+            next_actions=self._next_actions("apply", ok=ok),
         )
 
     def host_snapshot(self) -> dict[str, Any]:
@@ -577,7 +680,261 @@ class RuntimeAdapter:
             "detail": "journalctl query executed",
         }
 
-    def _deployment_commands(self, profile: DeploymentProfile, files: list[DeploymentPlannedFile], config_dir: str) -> list[DeploymentCommand]:
+    def _resolve_deployment_action(self, action: str | None, execute: bool) -> str:
+        if action:
+            return action
+        return "bundle" if execute else "preview"
+
+    def _write_bundle_rootfs(
+        self,
+        plan: DeploymentPlanResponse,
+        bundle_dir: Path,
+    ) -> tuple[list[str], list[DeploymentExecutionStep], list[dict[str, Any]]]:
+        rootfs_dir = bundle_dir / "rootfs"
+        rootfs_dir.mkdir(parents=True, exist_ok=True)
+        files_created: list[str] = []
+        steps: list[DeploymentExecutionStep] = []
+        manifest_files: list[dict[str, Any]] = []
+        for file in plan.files:
+            target = rootfs_dir / file.target_path.lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = Path(file.source_path)
+            target.write_text(source.read_text())
+            if target.suffix == ".sh":
+                target.chmod(0o755)
+            files_created.append(str(target))
+            manifest_files.append(
+                {
+                    "name": file.name,
+                    "source_path": file.source_path,
+                    "bundle_path": str(target),
+                    "target_path": file.target_path,
+                    "bytes": file.bytes,
+                    "sha256": self._file_sha256(target),
+                }
+            )
+            steps.append(
+                DeploymentExecutionStep(
+                    label=f"Bundle {file.name}",
+                    status="created",
+                    detail=f"Created {target}",
+                )
+            )
+        return files_created, steps, manifest_files
+
+    def _copy_bundle_rootfs(
+        self,
+        plan: DeploymentPlanResponse,
+        bundle_dir: Path,
+        source_bundle: Path,
+    ) -> tuple[list[str], list[DeploymentExecutionStep], list[dict[str, Any]]]:
+        rootfs_dir = bundle_dir / "rootfs"
+        rootfs_dir.mkdir(parents=True, exist_ok=True)
+        files_created: list[str] = []
+        steps: list[DeploymentExecutionStep] = []
+        manifest_files: list[dict[str, Any]] = []
+        for file in plan.files:
+            source = source_bundle / "rootfs" / file.target_path.lstrip("/")
+            target = rootfs_dir / file.target_path.lstrip("/")
+            if not source.exists():
+                raise ValueError(f"Rollback bundle is missing {source}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source.read_text())
+            if target.suffix == ".sh":
+                target.chmod(0o755)
+            files_created.append(str(target))
+            manifest_files.append(
+                {
+                    "name": file.name,
+                    "source_path": str(source),
+                    "bundle_path": str(target),
+                    "target_path": file.target_path,
+                    "bytes": target.stat().st_size,
+                    "sha256": self._file_sha256(target),
+                }
+            )
+            steps.append(
+                DeploymentExecutionStep(
+                    label=f"Seed rollback bundle {file.name}",
+                    status="created",
+                    detail=f"Copied {source} to {target}",
+                )
+            )
+        return files_created, steps, manifest_files
+
+    def _write_bundle_metadata(
+        self,
+        plan: DeploymentPlanResponse,
+        bundle_dir: Path,
+        files: list[dict[str, Any]],
+        mode: str,
+        config_snapshot: RelayConfig,
+        *,
+        source_bundle: Path | None = None,
+        host_touched: bool = False,
+        success: bool = True,
+    ) -> list[str]:
+        files_created: list[str] = []
+        commands_script = bundle_dir / "commands-preview.sh"
+        commands_script.write_text(self._commands_preview_script(plan))
+        commands_script.chmod(0o755)
+        files_created.append(str(commands_script))
+
+        secret_report = bundle_dir / "secret-template-report.json"
+        secret_report.write_text(json.dumps([item.model_dump(mode="json") for item in plan.secret_templates], indent=2))
+        files_created.append(str(secret_report))
+
+        manifest = self._bundle_manifest_path(bundle_dir)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "profile_id": plan.profile.id,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "mode": mode,
+                    "host_touched": host_touched,
+                    "success": success,
+                    "source_bundle": str(source_bundle) if source_bundle else None,
+                    "config": config_snapshot.model_dump(mode="json"),
+                    "files": files,
+                },
+                indent=2,
+            )
+        )
+        files_created.append(str(manifest))
+
+        bundle_readme = bundle_dir / "README.txt"
+        bundle_readme.write_text(self._bundle_readme(plan))
+        files_created.append(str(bundle_readme))
+        return files_created
+
+    def _update_bundle_manifest(self, bundle_dir: Path, *, host_touched: bool, success: bool) -> None:
+        manifest = self._bundle_manifest_path(bundle_dir)
+        payload = json.loads(manifest.read_text())
+        payload["host_touched"] = host_touched
+        payload["success"] = success
+        manifest.write_text(json.dumps(payload, indent=2))
+
+    def _apply_bundle_to_host(
+        self,
+        plan: DeploymentPlanResponse,
+        bundle_dir: Path,
+        config: RelayConfig,
+    ) -> tuple[list[DeploymentExecutionStep], bool]:
+        profile = plan.profile
+        rootfs_dir = bundle_dir / "rootfs"
+        systemctl = shutil.which("systemctl") or "systemctl"
+        steps: list[DeploymentExecutionStep] = []
+        ok = True
+
+        mkdir_command = ["sudo", "-n", "mkdir", "-p", profile.path_roots["config_dir"], profile.path_roots["bin_dir"], profile.path_roots["systemd_dir"]]
+        result = self._run_command(mkdir_command)
+        steps.append(self._command_step("Create local target directories", mkdir_command, result))
+        ok = ok and result.get("ok", False)
+
+        for file in plan.files:
+            source = rootfs_dir / file.target_path.lstrip("/")
+            mode = "0755" if file.name.endswith(".sh") else "0644"
+            command = ["sudo", "-n", "install", "-m", mode, str(source), file.target_path]
+            result = self._run_command(command)
+            steps.append(self._command_step(f"Install {file.name}", command, result))
+            ok = ok and result.get("ok", False)
+
+        env_example = profile.path_roots["config_dir"] + "/streamterminal-relay.env.example"
+        env_live = profile.path_roots["config_dir"] + "/streamterminal-relay.env"
+        env_check = self._run_command(["sudo", "-n", "test", "-f", env_live])
+        if env_check.get("ok"):
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Preserve live env file",
+                    status="skipped",
+                    detail=f"Left existing {env_live} untouched.",
+                )
+            )
+        else:
+            copy_result = self._run_command(["sudo", "-n", "cp", env_example, env_live])
+            steps.append(self._command_step("Seed live env file from example", ["sudo", "-n", "cp", env_example, env_live], copy_result))
+            ok = ok and copy_result.get("ok", False)
+            chmod_result = self._run_command(["sudo", "-n", "chmod", "600", env_live])
+            steps.append(self._command_step("Lock down live env file permissions", ["sudo", "-n", "chmod", "600", env_live], chmod_result))
+            ok = ok and chmod_result.get("ok", False)
+
+        daemon_reload = ["sudo", "-n", systemctl, "daemon-reload"]
+        daemon_result = self._run_command(daemon_reload)
+        steps.append(self._command_step("Reload systemd", daemon_reload, daemon_result))
+        ok = ok and daemon_result.get("ok", False)
+
+        for service_name, unit_name, enabled in [
+            ("mediamtx", self.SERVICE_UNIT_MAP["mediamtx"], config.mediamtx_enabled),
+            ("stream-failover-relay", self.SERVICE_UNIT_MAP["stream-failover-relay"], config.relay_enabled),
+        ]:
+            command = ["sudo", "-n", systemctl, "enable", "--now", unit_name] if enabled else ["sudo", "-n", systemctl, "disable", "--now", unit_name]
+            result = self._run_command(command)
+            steps.append(self._command_step(("Enable and start" if enabled else "Disable and stop") + f" {service_name}", command, result))
+            ok = ok and result.get("ok", False)
+
+            show_command = [systemctl, "show", unit_name, "--property=ActiveState,UnitFileState,SubState", "--no-pager"]
+            show_result = self._run_command(show_command)
+            state = self._parse_systemctl_show(show_result.get("stdout", ""))
+            service_ok = False
+            if enabled:
+                service_ok = state.get("ActiveState") == "active"
+                detail = f"ActiveState={state.get('ActiveState', 'unknown')}, UnitFileState={state.get('UnitFileState', 'unknown')}"
+            else:
+                service_ok = state.get("ActiveState") in {"inactive", "failed", "unknown", None} and state.get("UnitFileState") != "enabled"
+                detail = f"ActiveState={state.get('ActiveState', 'unknown')}, UnitFileState={state.get('UnitFileState', 'unknown')}"
+            steps.append(
+                DeploymentExecutionStep(
+                    label=f"Verify {service_name} state",
+                    status="executed" if service_ok else "failed",
+                    detail=detail,
+                )
+            )
+            ok = ok and service_ok and show_result.get("ok", False)
+
+        return steps, ok
+
+    def _command_step(self, label: str, command: list[str], result: dict[str, Any]) -> DeploymentExecutionStep:
+        output = (result.get("stdout") or result.get("stderr") or "").strip()
+        if output:
+            output = " | ".join(output.splitlines()[:3])
+        detail = f"$ {' '.join(command)}"
+        if output:
+            detail += f" -> {output}"
+        return DeploymentExecutionStep(
+            label=label,
+            status="executed" if result.get("ok") else "failed",
+            detail=detail,
+        )
+
+    @staticmethod
+    def _parse_systemctl_show(output: str) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for line in output.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                parsed[key] = value
+        return parsed
+
+    def _applied_bundle_dirs(self, profile_id: str) -> list[Path]:
+        applied: list[Path] = []
+        for bundle_dir in sorted(self.bundle_root.glob(f"*-{profile_id}")):
+            manifest = self._load_bundle_manifest(bundle_dir)
+            if manifest.get("mode") in {"apply", "rollback"} and manifest.get("host_touched") and manifest.get("success"):
+                applied.append(bundle_dir)
+        return applied
+
+    def _previous_applied_bundle(self, profile_id: str) -> Path | None:
+        bundles = self._applied_bundle_dirs(profile_id)
+        if len(bundles) < 2:
+            return None
+        return bundles[-2]
+
+    @staticmethod
+    def _bundle_manifest_path(bundle_dir: Path) -> Path:
+        return bundle_dir / "deploy-manifest.json"
+
+    def _deployment_commands(self, profile: DeploymentProfile, files: list[DeploymentPlannedFile], config: RelayConfig) -> list[DeploymentCommand]:
+        config_dir = profile.path_roots["config_dir"]
         env_example = f"{config_dir}/streamterminal-relay.env.example"
         env_live = f"{config_dir}/streamterminal-relay.env"
         mkdirs = " ".join(self._shell_escape(profile.path_roots[key]) for key in ["config_dir", "bin_dir", "systemd_dir"])
@@ -603,9 +960,9 @@ class RuntimeAdapter:
             [
                 DeploymentCommand(
                     phase="copy",
-                    label="Create live env file from example",
+                    label="Seed live env file only when missing",
                     run_on="local",
-                    command=f"sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}",
+                    command=f"if [ ! -f {self._shell_escape(env_live)} ]; then sudo cp {self._shell_escape(env_example)} {self._shell_escape(env_live)} && sudo chmod 600 {self._shell_escape(env_live)}; fi",
                 ),
                 DeploymentCommand(
                     phase="activate",
@@ -615,15 +972,21 @@ class RuntimeAdapter:
                 ),
                 DeploymentCommand(
                     phase="activate",
-                    label="Restart local services",
+                    label=("Enable and start mediamtx" if config.mediamtx_enabled else "Disable and stop mediamtx"),
                     run_on="local",
-                    command="sudo systemctl restart mediamtx.service stream-failover-relay.service",
+                    command=("sudo systemctl enable --now mediamtx.service" if config.mediamtx_enabled else "sudo systemctl disable --now mediamtx.service"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label=("Enable and start stream-failover-relay" if config.relay_enabled else "Disable and stop stream-failover-relay"),
+                    run_on="local",
+                    command=("sudo systemctl enable --now stream-failover-relay.service" if config.relay_enabled else "sudo systemctl disable --now stream-failover-relay.service"),
                 ),
                 DeploymentCommand(
                     phase="verify",
                     label="Check local service state",
                     run_on="local",
-                    command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager",
+                    command="systemctl show mediamtx.service stream-failover-relay.service --property=ActiveState,UnitFileState,SubState --no-pager",
                 ),
             ]
         )
@@ -676,11 +1039,35 @@ class RuntimeAdapter:
             ]
         )
 
-    def _next_actions(self) -> list[str]:
+    def _next_actions(self, mode: str, ok: bool) -> list[str]:
+        if mode == "preview":
+            return [
+                "Run local preflight before attempting a true host apply.",
+                "Inspect the planned bundle location and generated file map.",
+                "Review env handling so real stream URLs stay only in the on-host env file.",
+            ]
+        if mode == "bundle":
+            return [
+                "Inspect the generated bundle under apps/api/data/runtime/deploy-bundles/.",
+                "Use it for audit/review or as a manual fallback package for this same host.",
+                "Run local preflight before switching from bundle generation to true apply.",
+            ]
+        if mode == "apply":
+            if ok:
+                return [
+                    "Inspect /etc/streamterminal-relay-matrix and /etc/systemd/system on this host.",
+                    "Verify the live env file contains real local secrets and stream URLs.",
+                    "Review service logs from the diagnostics page if you need post-apply validation.",
+                ]
+            return [
+                "Read the failed execution steps to see which local sudo or systemd command broke.",
+                "Run local preflight and confirm required binaries are installed on this machine.",
+                "Use local rollback after fixing prerequisites if the current host state needs to be reverted.",
+            ]
         return [
-            "Inspect the generated bundle under apps/api/data/runtime/deploy-bundles/.",
-            "Copy streamterminal-relay.env.example to a real local env file and replace placeholders.",
-            "Run only the reviewed local commands you trust with sudo on this machine.",
+            "Confirm the restored host files match the previous known-good local bundle.",
+            "Check service state and logs on this machine after rollback.",
+            "Re-run audit/preflight before attempting another true apply.",
         ]
 
     def _latest_bundle_dir(self, profile_id: str) -> Path | None:
