@@ -10,6 +10,7 @@ ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-
 DeploymentProfileId = Literal["local-dev", "staging-vm", "production-vm"]
 DeploymentRunOn = Literal["local", "remote"]
 DeploymentPhase = Literal["prepare", "copy", "activate", "verify"]
+DeploymentExecutionMode = Literal["preview", "bundle"]
 
 
 class StreamEndpoint(BaseModel):
@@ -137,6 +138,15 @@ class DeploymentPlannedFile(BaseModel):
     preview: str
 
 
+class DeploymentSecretTemplate(BaseModel):
+    name: str
+    example_path: str
+    live_path: str
+    example_content: str
+    masked_current_values: dict[str, str] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
 class DeploymentPlanResponse(BaseModel):
     profile: DeploymentProfile
     staged_root: str
@@ -144,7 +154,32 @@ class DeploymentPlanResponse(BaseModel):
     latest_revision: ConfigRevision | None = None
     files: list[DeploymentPlannedFile] = Field(default_factory=list)
     commands: list[DeploymentCommand] = Field(default_factory=list)
+    secret_templates: list[DeploymentSecretTemplate] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class DeployExecuteRequest(BaseModel):
+    profile_id: DeploymentProfileId = "local-dev"
+    execute: bool = False
+
+
+class DeploymentExecutionStep(BaseModel):
+    label: str
+    status: Literal["preview", "created", "skipped"]
+    detail: str
+
+
+class DeployExecuteResponse(BaseModel):
+    ok: bool
+    executed: bool
+    mode: DeploymentExecutionMode
+    profile: DeploymentProfile
+    bundle_root: str
+    remote_touched: bool
+    files_created: list[str] = Field(default_factory=list)
+    steps: list[DeploymentExecutionStep] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
 
 
 class DiagnosticsResponse(BaseModel):

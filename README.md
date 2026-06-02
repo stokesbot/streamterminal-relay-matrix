@@ -75,13 +75,16 @@ http://127.0.0.1:3000
 - configuration page
 - diagnostics page with artifact previews, host tool probes, and systemd unit state
 - deployment planning page with profile selection, staged-vs-target mapping, command previews, and rollout notes
+- safe deploy execution page actions for preview mode and local bundle generation
 - backend draft config load/save
 - backend config validation endpoint
 - backend apply / rollback endpoints
 - generated MediaMTX and relay runtime artifacts
 - generated systemd unit templates for both runtime services
+- placeholder-only env-file template generation with masked current URL previews
 - staged local install layout under `apps/api/data/runtime/install-root/`
 - deployment profile API and staged-to-target rollout plan endpoint
+- safe deploy bundle execution endpoint that writes reviewed artifacts under `apps/api/data/runtime/deploy-bundles/`
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
 - UI controls for apply / stage-install / service actions / log fetch
@@ -114,4 +117,4 @@ Design the data model so multi-channel support can be added later.
 
 ## Status
 
-Prototype scaffold complete. Runtime integration, service controls, diagnostics, and deployment planning are now wired. Real remote deployment execution and secret-handling automation are the next phase.
+Prototype scaffold complete. Runtime integration, service controls, diagnostics, deployment planning, and safe local bundle generation are now wired. Real remote deployment execution should remain manual until host-specific auth, secrets, and rollback policies are finalized.

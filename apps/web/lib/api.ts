@@ -107,6 +107,15 @@ export type DeploymentProfile = {
   secret_placeholders: string[];
 };
 
+export type DeploymentSecretTemplate = {
+  name: string;
+  example_path: string;
+  live_path: string;
+  example_content: string;
+  masked_current_values: Record<string, string>;
+  notes: string[];
+};
+
 export type DeploymentPlan = {
   profile: DeploymentProfile;
   staged_root: string;
@@ -131,7 +140,25 @@ export type DeploymentPlan = {
     run_on: "local" | "remote";
     command: string;
   }>;
+  secret_templates: DeploymentSecretTemplate[];
   warnings: string[];
+};
+
+export type DeployExecuteResponse = {
+  ok: boolean;
+  executed: boolean;
+  mode: "preview" | "bundle";
+  profile: DeploymentProfile;
+  bundle_root: string;
+  remote_touched: boolean;
+  files_created: string[];
+  steps: Array<{
+    label: string;
+    status: "preview" | "created" | "skipped";
+    detail: string;
+  }>;
+  warnings: string[];
+  next_actions: string[];
 };
 
 export type DiagnosticsResponse = {
@@ -151,6 +178,7 @@ export type DiagnosticsResponse = {
     host: {
       runtime_dir: string;
       install_root: string;
+      bundle_root?: string;
       tools: Record<
         string,
         {

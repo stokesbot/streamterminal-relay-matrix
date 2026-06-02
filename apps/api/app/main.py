@@ -7,6 +7,8 @@ from .config import get_settings
 from .runtime import RuntimeAdapter
 from .schemas import (
     ApplyResult,
+    DeployExecuteRequest,
+    DeployExecuteResponse,
     DeploymentPlanResponse,
     DeploymentProfile,
     DiagnosticsResponse,
@@ -15,8 +17,8 @@ from .schemas import (
     RuntimeStatus,
     ServiceActionRequest,
     ServiceActionResult,
-    ServiceStatus,
     ServiceLogsResponse,
+    ServiceStatus,
     ValidationIssue,
     ValidationResult,
 )
@@ -201,6 +203,24 @@ def deploy_plan(profile_id: str = Query(default="local-dev")) -> DeploymentPlanR
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/deploy/execute", response_model=DeployExecuteResponse)
+def deploy_execute(request: DeployExecuteRequest) -> DeployExecuteResponse:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    try:
+        return runtime.execute_deployment_bundle(
+            config,
+            profile_id=request.profile_id,
+            execute=request.execute,
+            latest_revision=store.latest_revision(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/runtime/status", response_model=RuntimeStatus)
 def runtime_status() -> RuntimeStatus:
     config = store.load()
@@ -254,6 +274,7 @@ def runtime_status() -> RuntimeStatus:
             "Host diagnostics now probe local runtime binaries and command availability",
             "Runtime install staging and service-control APIs are now available",
             "Deployment planning profiles now preview staged-to-target copy and activation steps",
+            "Safe deploy bundle execution now writes env-template-aware bundles without touching target hosts",
         ],
     )
 
