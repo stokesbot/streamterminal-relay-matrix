@@ -78,6 +78,9 @@ http://127.0.0.1:3000
 - backend apply / rollback endpoints
 - generated MediaMTX and relay runtime artifacts
 - generated systemd unit templates for both runtime services
+- staged local install layout under `apps/api/data/runtime/install-root/`
+- service-control API with dry-run or execute modes for known runtime services
+- log inspection API via `journalctl`
 - diagnostics endpoint with template previews and host binary probing
 - runtime status endpoint backed by real local command availability checks
 - dark operator UI scaffold

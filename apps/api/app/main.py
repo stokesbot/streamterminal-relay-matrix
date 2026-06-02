@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
@@ -8,8 +8,12 @@ from .runtime import RuntimeAdapter
 from .schemas import (
     ApplyResult,
     DiagnosticsResponse,
+    InstallResult,
     RelayConfig,
     RuntimeStatus,
+    ServiceActionRequest,
+    ServiceActionResult,
+    ServiceLogsResponse,
     ServiceStatus,
     ValidationIssue,
     ValidationResult,
@@ -158,6 +162,21 @@ def rollback_config() -> ApplyResult:
     )
 
 
+@app.post("/api/runtime/install", response_model=InstallResult)
+def install_runtime() -> InstallResult:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    installed = runtime.install_artifacts(config)
+    return InstallResult(
+        ok=True,
+        installed_to=str(runtime.install_root),
+        artifacts=[artifact.path for artifact in installed],
+    )
+
+
 @app.get("/api/runtime/status", response_model=RuntimeStatus)
 def runtime_status() -> RuntimeStatus:
     config = store.load()
@@ -209,8 +228,27 @@ def runtime_status() -> RuntimeStatus:
             "Prototype scaffold online",
             "Draft/apply/rollback path now generates runtime artifacts locally",
             "Host diagnostics now probe local runtime binaries and command availability",
+            "Runtime install staging and service-control APIs are now available",
         ],
     )
+
+
+@app.post("/api/services/{service_name}/action", response_model=ServiceActionResult)
+def service_action(service_name: str, request: ServiceActionRequest) -> ServiceActionResult:
+    try:
+        result = runtime.service_action(service_name, request.action, execute=request.execute)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ServiceActionResult.model_validate(result)
+
+
+@app.get("/api/services/{service_name}/logs", response_model=ServiceLogsResponse)
+def service_logs(service_name: str, lines: int = Query(default=50, ge=1, le=500)) -> ServiceLogsResponse:
+    try:
+        result = runtime.service_logs(service_name, lines=lines)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ServiceLogsResponse.model_validate(result)
 
 
 @app.get("/api/diagnostics", response_model=DiagnosticsResponse)

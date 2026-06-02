@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,9 +9,16 @@ from .schemas import GeneratedArtifact, RelayConfig
 
 
 class RuntimeAdapter:
+    SERVICE_UNIT_MAP = {
+        "mediamtx": "mediamtx.service",
+        "stream-failover-relay": "stream-failover-relay.service",
+    }
+
     def __init__(self, runtime_dir: str | Path) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.install_root = self.runtime_dir / "install-root"
+        self.install_root.mkdir(parents=True, exist_ok=True)
 
     def mediamtx_config(self, config: RelayConfig) -> str:
         if not config.mediamtx_enabled:
@@ -46,7 +55,7 @@ class RuntimeAdapter:
 
     def mediamtx_service(self, config: RelayConfig) -> str:
         mediamtx_binary = shutil.which("mediamtx") or "/usr/local/bin/mediamtx"
-        config_path = self.runtime_dir / "mediamtx.yml"
+        config_path = self.install_root / "etc/streamterminal-relay-matrix/mediamtx.yml"
 
         return (
             "[Unit]\n"
@@ -65,7 +74,7 @@ class RuntimeAdapter:
 
     def relay_service(self, config: RelayConfig) -> str:
         relay_binary = shutil.which("stream-failover-relay") or "/usr/local/bin/stream-failover-relay"
-        command_path = self.runtime_dir / "relay-command.sh"
+        command_path = self.install_root / "usr/local/bin/relay-command.sh"
 
         return (
             "[Unit]\n"
@@ -118,17 +127,54 @@ class RuntimeAdapter:
 
         return artifacts
 
+    def install_artifacts(self, config: RelayConfig) -> list[GeneratedArtifact]:
+        self.write_runtime_artifacts(config)
+
+        installed = [
+            GeneratedArtifact(
+                name="mediamtx.yml",
+                path=str(self.install_root / "etc/streamterminal-relay-matrix/mediamtx.yml"),
+                content=self.mediamtx_config(config),
+            ),
+            GeneratedArtifact(
+                name="relay-command.sh",
+                path=str(self.install_root / "usr/local/bin/relay-command.sh"),
+                content="#!/usr/bin/env bash\n" + self.relay_command(config),
+            ),
+            GeneratedArtifact(
+                name="mediamtx.service",
+                path=str(self.install_root / "etc/systemd/system/mediamtx.service"),
+                content=self.mediamtx_service(config),
+            ),
+            GeneratedArtifact(
+                name="stream-failover-relay.service",
+                path=str(self.install_root / "etc/systemd/system/stream-failover-relay.service"),
+                content=self.relay_service(config),
+            ),
+        ]
+
+        for artifact in installed:
+            path = Path(artifact.path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(artifact.content)
+            if path.suffix == ".sh":
+                path.chmod(0o755)
+
+        return installed
+
     def host_snapshot(self) -> dict[str, Any]:
         tools = {
             "mediamtx": ["mediamtx", "--version"],
             "stream-failover-relay": ["stream-failover-relay", "--help"],
             "ffmpeg": ["ffmpeg", "-version"],
             "ffprobe": ["ffprobe", "-version"],
+            "journalctl": ["journalctl", "--version"],
             "systemctl": ["systemctl", "--version"],
         }
 
         return {
             "runtime_dir": str(self.runtime_dir),
+            "install_root": str(self.install_root),
             "tools": {
                 name: self._probe_command(command)
                 for name, command in tools.items()
@@ -137,11 +183,87 @@ class RuntimeAdapter:
         }
 
     def systemd_unit_snapshot(self) -> dict[str, Any]:
-        units = [
-            "mediamtx.service",
-            "stream-failover-relay.service",
-        ]
-        return {unit: self._probe_systemd_unit(unit) for unit in units}
+        return {
+            unit: self._probe_systemd_unit(unit)
+            for unit in self.SERVICE_UNIT_MAP.values()
+        }
+
+    def service_action(
+        self,
+        service_name: str,
+        action: str,
+        execute: bool = False,
+    ) -> dict[str, Any]:
+        unit_name = self._unit_name(service_name)
+        command = self._systemctl_command(action, unit_name)
+
+        if not execute:
+            return {
+                "ok": True,
+                "executed": False,
+                "service": service_name,
+                "unit": unit_name,
+                "action": action,
+                "command": command,
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+            }
+
+        return {
+            "service": service_name,
+            "unit": unit_name,
+            "action": action,
+            "command": command,
+            **self._run_command(command),
+        }
+
+    def service_logs(self, service_name: str, lines: int = 100) -> dict[str, Any]:
+        unit_name = self._unit_name(service_name)
+        journalctl = shutil.which("journalctl")
+        if not journalctl:
+            return {
+                "service": service_name,
+                "unit": unit_name,
+                "available": False,
+                "lines": [],
+                "detail": "journalctl not available on host",
+            }
+
+        command = [journalctl, "-u", unit_name, "-n", str(lines), "--no-pager"]
+        result = self._run_command(command)
+        output = result.get("stdout") or result.get("stderr") or ""
+
+        return {
+            "service": service_name,
+            "unit": unit_name,
+            "available": True,
+            "command": command,
+            "exit_code": result.get("exit_code", 1),
+            "lines": output.splitlines(),
+            "detail": "journalctl query executed",
+        }
+
+    def _unit_name(self, service_name: str) -> str:
+        try:
+            return self.SERVICE_UNIT_MAP[service_name]
+        except KeyError as exc:
+            raise ValueError(f"Unknown service: {service_name}") from exc
+
+    def _systemctl_command(self, action: str, unit_name: str) -> list[str]:
+        systemctl = shutil.which("systemctl") or "systemctl"
+        action_map = {
+            "start": [systemctl, "start", unit_name],
+            "stop": [systemctl, "stop", unit_name],
+            "restart": [systemctl, "restart", unit_name],
+            "reload": [systemctl, "reload", unit_name],
+            "status": [systemctl, "status", unit_name, "--no-pager"],
+            "daemon-reload": [systemctl, "daemon-reload"],
+        }
+        try:
+            return action_map[action]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported action: {action}") from exc
 
     def _probe_command(self, command: list[str]) -> dict[str, Any]:
         binary = command[0]
@@ -206,6 +328,31 @@ class RuntimeAdapter:
             result["error"] = str(exc)
 
         return result
+
+    def _run_command(self, command: list[str]) -> dict[str, Any]:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return {
+                "ok": completed.returncode == 0,
+                "executed": True,
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+        except Exception as exc:  # pragma: no cover - defensive execution path
+            return {
+                "ok": False,
+                "executed": True,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": str(exc),
+            }
 
     @staticmethod
     def _shell_escape(value: str) -> str:

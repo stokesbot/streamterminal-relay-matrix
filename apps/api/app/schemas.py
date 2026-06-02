@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 Protocol = Literal["rtmp", "srt", "rtsp", "udp", "file"]
 ConnectionMode = Literal["pull", "push", "listener", "caller"]
 IssueLevel = Literal["info", "warning", "error"]
+ServiceName = Literal["mediamtx", "stream-failover-relay"]
+ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-reload"]
 
 
 class StreamEndpoint(BaseModel):
@@ -69,6 +71,39 @@ class GeneratedArtifact(BaseModel):
     name: str
     path: str
     content: str
+
+
+class InstallResult(BaseModel):
+    ok: bool
+    installed_to: str
+    artifacts: list[str] = Field(default_factory=list)
+
+
+class ServiceActionRequest(BaseModel):
+    action: ServiceAction
+    execute: bool = False
+
+
+class ServiceActionResult(BaseModel):
+    ok: bool
+    executed: bool
+    service: ServiceName
+    unit: str
+    action: ServiceAction
+    command: list[str]
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+
+
+class ServiceLogsResponse(BaseModel):
+    service: ServiceName
+    unit: str
+    available: bool
+    detail: str
+    command: list[str] | None = None
+    exit_code: int | None = None
+    lines: list[str] = Field(default_factory=list)
 
 
 class DiagnosticsResponse(BaseModel):
