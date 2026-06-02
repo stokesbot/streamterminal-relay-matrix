@@ -12,14 +12,14 @@ DEFAULT_CONFIG = RelayConfig(
     primary_input={
         "label": "Primary",
         "protocol": "rtmp",
-        "url": "rtmp://localhost:1935/live/main",
+        "url": "rtmp://localhost:1936/live/main",
         "mode": "pull",
         "enabled": True,
     },
     backup_input={
         "label": "Backup",
         "protocol": "rtmp",
-        "url": "rtmp://localhost:1935/live/backup",
+        "url": "rtmp://localhost:1936/live/backup",
         "mode": "pull",
         "enabled": True,
     },

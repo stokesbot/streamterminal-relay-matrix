@@ -49,11 +49,12 @@ class RuntimeAdapter:
 
         primary_path = self._path_name(config.primary_input, "main")
         backup_path = self._path_name(config.backup_input, "backup")
+        listen_address = self._rtmp_listen_address(config)
 
         return (
             "logLevel: info\n"
             "rtmp: yes\n"
-            "rtmpAddress: :1935\n"
+            f"rtmpAddress: {listen_address}\n"
             "hls: no\n"
             "webrtc: no\n"
             "srt: no\n"
@@ -1179,6 +1180,14 @@ class RuntimeAdapter:
         parsed = urlparse(endpoint.url)
         path = parsed.path.strip("/")
         return path or fallback
+
+    @staticmethod
+    def _rtmp_listen_address(config: RelayConfig) -> str:
+        parsed = urlparse(config.primary_input.url)
+        port = parsed.port
+        if parsed.scheme == "rtmp" and port is None:
+            port = 1935
+        return f":{port}" if port else ":1935"
 
     @staticmethod
     def _looks_sensitive_url(url: str) -> bool:
