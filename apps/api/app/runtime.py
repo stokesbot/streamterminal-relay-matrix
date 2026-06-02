@@ -133,7 +133,15 @@ class RuntimeAdapter:
                 name: self._probe_command(command)
                 for name, command in tools.items()
             },
+            "systemd_units": self.systemd_unit_snapshot(),
         }
+
+    def systemd_unit_snapshot(self) -> dict[str, Any]:
+        units = [
+            "mediamtx.service",
+            "stream-failover-relay.service",
+        ]
+        return {unit: self._probe_systemd_unit(unit) for unit in units}
 
     def _probe_command(self, command: list[str]) -> dict[str, Any]:
         binary = command[0]
@@ -158,6 +166,42 @@ class RuntimeAdapter:
             output = completed.stdout or completed.stderr
             result["exit_code"] = completed.returncode
             result["preview"] = "\n".join(output.splitlines()[:3])
+        except Exception as exc:  # pragma: no cover - defensive probe path
+            result["error"] = str(exc)
+
+        return result
+
+    def _probe_systemd_unit(self, unit_name: str) -> dict[str, Any]:
+        systemctl = shutil.which("systemctl")
+        result: dict[str, Any] = {
+            "unit": unit_name,
+            "available": bool(systemctl),
+        }
+
+        if not systemctl:
+            return result
+
+        try:
+            completed = subprocess.run(
+                [
+                    systemctl,
+                    "show",
+                    unit_name,
+                    "--property=LoadState,ActiveState,SubState,UnitFileState",
+                    "--no-pager",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            result["exit_code"] = completed.returncode
+            parsed: dict[str, str] = {}
+            for line in (completed.stdout or completed.stderr).splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    parsed[key] = value
+            result["state"] = parsed
         except Exception as exc:  # pragma: no cover - defensive probe path
             result["error"] = str(exc)
 
