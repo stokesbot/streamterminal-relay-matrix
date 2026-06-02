@@ -223,6 +223,12 @@ export default function ConfigPage() {
             >
               Diagnostics
             </Link>
+            <Link
+              className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+              href="/deploy"
+            >
+              Deploy plan
+            </Link>
           </div>
         </header>
 

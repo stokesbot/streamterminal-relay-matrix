@@ -7,14 +7,16 @@ from .config import get_settings
 from .runtime import RuntimeAdapter
 from .schemas import (
     ApplyResult,
+    DeploymentPlanResponse,
+    DeploymentProfile,
     DiagnosticsResponse,
     InstallResult,
     RelayConfig,
     RuntimeStatus,
     ServiceActionRequest,
     ServiceActionResult,
-    ServiceLogsResponse,
     ServiceStatus,
+    ServiceLogsResponse,
     ValidationIssue,
     ValidationResult,
 )
@@ -177,6 +179,28 @@ def install_runtime() -> InstallResult:
     )
 
 
+@app.get("/api/deploy/profiles", response_model=list[DeploymentProfile])
+def deploy_profiles() -> list[DeploymentProfile]:
+    return runtime.deployment_profiles()
+
+
+@app.get("/api/deploy/plan", response_model=DeploymentPlanResponse)
+def deploy_plan(profile_id: str = Query(default="local-dev")) -> DeploymentPlanResponse:
+    config = store.load()
+    validation = validate_config(config)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.model_dump(mode="json"))
+
+    try:
+        return runtime.deployment_plan(
+            config,
+            profile_id=profile_id,
+            latest_revision=store.latest_revision(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/runtime/status", response_model=RuntimeStatus)
 def runtime_status() -> RuntimeStatus:
     config = store.load()
@@ -229,6 +253,7 @@ def runtime_status() -> RuntimeStatus:
             "Draft/apply/rollback path now generates runtime artifacts locally",
             "Host diagnostics now probe local runtime binaries and command availability",
             "Runtime install staging and service-control APIs are now available",
+            "Deployment planning profiles now preview staged-to-target copy and activation steps",
         ],
     )
 

@@ -7,6 +7,9 @@ ConnectionMode = Literal["pull", "push", "listener", "caller"]
 IssueLevel = Literal["info", "warning", "error"]
 ServiceName = Literal["mediamtx", "stream-failover-relay"]
 ServiceAction = Literal["start", "stop", "restart", "reload", "status", "daemon-reload"]
+DeploymentProfileId = Literal["local-dev", "staging-vm", "production-vm"]
+DeploymentRunOn = Literal["local", "remote"]
+DeploymentPhase = Literal["prepare", "copy", "activate", "verify"]
 
 
 class StreamEndpoint(BaseModel):
@@ -104,6 +107,44 @@ class ServiceLogsResponse(BaseModel):
     command: list[str] | None = None
     exit_code: int | None = None
     lines: list[str] = Field(default_factory=list)
+
+
+class DeploymentProfile(BaseModel):
+    id: DeploymentProfileId
+    label: str
+    description: str
+    run_on: DeploymentRunOn
+    target_host: str
+    target_user: str
+    path_roots: dict[str, str] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+    secret_placeholders: list[str] = Field(default_factory=list)
+
+
+class DeploymentCommand(BaseModel):
+    phase: DeploymentPhase
+    label: str
+    run_on: DeploymentRunOn
+    command: str
+
+
+class DeploymentPlannedFile(BaseModel):
+    name: str
+    source_path: str
+    target_path: str
+    bytes: int
+    exists_in_stage: bool
+    preview: str
+
+
+class DeploymentPlanResponse(BaseModel):
+    profile: DeploymentProfile
+    staged_root: str
+    generated_at: str
+    latest_revision: ConfigRevision | None = None
+    files: list[DeploymentPlannedFile] = Field(default_factory=list)
+    commands: list[DeploymentCommand] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DiagnosticsResponse(BaseModel):

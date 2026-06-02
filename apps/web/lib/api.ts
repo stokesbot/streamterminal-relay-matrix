@@ -65,6 +65,7 @@ export type ServiceAction =
   | "daemon-reload";
 
 export type ServiceName = "mediamtx" | "stream-failover-relay";
+export type DeploymentProfileId = "local-dev" | "staging-vm" | "production-vm";
 
 export type ServiceActionResult = {
   ok: boolean;
@@ -92,6 +93,45 @@ export type GeneratedArtifact = {
   name: string;
   path: string;
   content: string;
+};
+
+export type DeploymentProfile = {
+  id: DeploymentProfileId;
+  label: string;
+  description: string;
+  run_on: "local" | "remote";
+  target_host: string;
+  target_user: string;
+  path_roots: Record<string, string>;
+  notes: string[];
+  secret_placeholders: string[];
+};
+
+export type DeploymentPlan = {
+  profile: DeploymentProfile;
+  staged_root: string;
+  generated_at: string;
+  latest_revision?: {
+    version: number;
+    status: string;
+    created_at: string;
+    note: string;
+  } | null;
+  files: Array<{
+    name: string;
+    source_path: string;
+    target_path: string;
+    bytes: number;
+    exists_in_stage: boolean;
+    preview: string;
+  }>;
+  commands: Array<{
+    phase: "prepare" | "copy" | "activate" | "verify";
+    label: string;
+    run_on: "local" | "remote";
+    command: string;
+  }>;
+  warnings: string[];
 };
 
 export type DiagnosticsResponse = {

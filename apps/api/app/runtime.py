@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .schemas import GeneratedArtifact, RelayConfig
+from .schemas import (
+    DeploymentCommand,
+    DeploymentPlanResponse,
+    DeploymentPlannedFile,
+    DeploymentProfile,
+    GeneratedArtifact,
+    RelayConfig,
+)
 
 
 class RuntimeAdapter:
@@ -162,6 +170,119 @@ class RuntimeAdapter:
 
         return installed
 
+    def deployment_profiles(self) -> list[DeploymentProfile]:
+        return [
+            DeploymentProfile(
+                id="local-dev",
+                label="Local development host",
+                description="Copy staged artifacts into local target paths and restart services on this machine.",
+                run_on="local",
+                target_host="localhost",
+                target_user="current-user",
+                path_roots={
+                    "config_dir": "/etc/streamterminal-relay-matrix",
+                    "bin_dir": "/usr/local/bin",
+                    "systemd_dir": "/etc/systemd/system",
+                },
+                notes=[
+                    "Use for a single-node local validation cycle.",
+                    "Review generated files before copying into privileged paths.",
+                ],
+                secret_placeholders=[
+                    "Prefer environment files for output URLs containing credentials or stream keys.",
+                ],
+            ),
+            DeploymentProfile(
+                id="staging-vm",
+                label="Staging VM",
+                description="Preview a remote deploy to a staging relay host over SSH/rsync.",
+                run_on="remote",
+                target_host="relay-staging.example.internal",
+                target_user="relayops",
+                path_roots={
+                    "config_dir": "/etc/streamterminal-relay-matrix",
+                    "bin_dir": "/usr/local/bin",
+                    "systemd_dir": "/etc/systemd/system",
+                },
+                notes=[
+                    "Use a non-production relay VM first.",
+                    "Match installed MediaMTX and stream-failover-relay binaries before activation.",
+                ],
+                secret_placeholders=[
+                    "Inject real output endpoints via remote env/secrets, not by committing them into repo defaults.",
+                ],
+            ),
+            DeploymentProfile(
+                id="production-vm",
+                label="Production VM",
+                description="Preview a controlled production deploy with restart and verification commands.",
+                run_on="remote",
+                target_host="relay-prod.example.internal",
+                target_user="relayops",
+                path_roots={
+                    "config_dir": "/etc/streamterminal-relay-matrix",
+                    "bin_dir": "/usr/local/bin",
+                    "systemd_dir": "/etc/systemd/system",
+                },
+                notes=[
+                    "Schedule around live traffic and encoder availability.",
+                    "Prefer restart windows with a rollback plan ready.",
+                ],
+                secret_placeholders=[
+                    "Verify stream keys and destination credentials on-host immediately before activation.",
+                ],
+            ),
+        ]
+
+    def deployment_profile(self, profile_id: str) -> DeploymentProfile:
+        for profile in self.deployment_profiles():
+            if profile.id == profile_id:
+                return profile
+        raise ValueError(f"Unknown deployment profile: {profile_id}")
+
+    def deployment_plan(
+        self,
+        config: RelayConfig,
+        profile_id: str,
+        latest_revision: Any | None = None,
+    ) -> DeploymentPlanResponse:
+        profile = self.deployment_profile(profile_id)
+        staged = self.install_artifacts(config)
+        files: list[DeploymentPlannedFile] = []
+
+        mapping = {
+            "mediamtx.yml": profile.path_roots["config_dir"] + "/mediamtx.yml",
+            "relay-command.sh": profile.path_roots["bin_dir"] + "/relay-command.sh",
+            "mediamtx.service": profile.path_roots["systemd_dir"] + "/mediamtx.service",
+            "stream-failover-relay.service": profile.path_roots["systemd_dir"] + "/stream-failover-relay.service",
+        }
+
+        for artifact in staged:
+            source_path = Path(artifact.path)
+            files.append(
+                DeploymentPlannedFile(
+                    name=artifact.name,
+                    source_path=str(source_path),
+                    target_path=mapping[artifact.name],
+                    bytes=source_path.stat().st_size if source_path.exists() else len(artifact.content.encode()),
+                    exists_in_stage=source_path.exists(),
+                    preview="\n".join(artifact.content.splitlines()[:10]),
+                )
+            )
+
+        commands = self._deployment_commands(profile, files)
+        warnings = self._deployment_warnings(config, profile)
+
+        return DeploymentPlanResponse(
+            profile=profile,
+            staged_root=str(self.install_root),
+            generated_at=datetime.now(UTC).isoformat(),
+            latest_revision=latest_revision,
+            files=files,
+            commands=commands,
+            warnings=warnings,
+        )
+
     def host_snapshot(self) -> dict[str, Any]:
         tools = {
             "mediamtx": ["mediamtx", "--version"],
@@ -170,6 +291,8 @@ class RuntimeAdapter:
             "ffprobe": ["ffprobe", "-version"],
             "journalctl": ["journalctl", "--version"],
             "systemctl": ["systemctl", "--version"],
+            "rsync": ["rsync", "--version"],
+            "ssh": ["ssh", "-V"],
         }
 
         return {
@@ -244,6 +367,154 @@ class RuntimeAdapter:
             "detail": "journalctl query executed",
         }
 
+    def _deployment_commands(
+        self,
+        profile: DeploymentProfile,
+        files: list[DeploymentPlannedFile],
+    ) -> list[DeploymentCommand]:
+        commands: list[DeploymentCommand] = []
+        if profile.run_on == "local":
+            mkdirs = " ".join(
+                self._shell_escape(profile.path_roots[key])
+                for key in ["config_dir", "bin_dir", "systemd_dir"]
+            )
+            commands.append(
+                DeploymentCommand(
+                    phase="prepare",
+                    label="Create target directories",
+                    run_on="local",
+                    command=f"sudo mkdir -p {mkdirs}",
+                )
+            )
+            for file in files:
+                mode = "0755" if file.name.endswith(".sh") else "0644"
+                commands.append(
+                    DeploymentCommand(
+                        phase="copy",
+                        label=f"Install {file.name}",
+                        run_on="local",
+                        command=(
+                            "sudo install -m "
+                            + mode
+                            + " "
+                            + self._shell_escape(file.source_path)
+                            + " "
+                            + self._shell_escape(file.target_path)
+                        ),
+                    )
+                )
+            commands.extend(
+                [
+                    DeploymentCommand(
+                        phase="activate",
+                        label="Reload systemd",
+                        run_on="local",
+                        command="sudo systemctl daemon-reload",
+                    ),
+                    DeploymentCommand(
+                        phase="activate",
+                        label="Restart services",
+                        run_on="local",
+                        command="sudo systemctl restart mediamtx.service stream-failover-relay.service",
+                    ),
+                    DeploymentCommand(
+                        phase="verify",
+                        label="Check service state",
+                        run_on="local",
+                        command="sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager",
+                    ),
+                ]
+            )
+            return commands
+
+        target = f"{profile.target_user}@{profile.target_host}"
+        commands.append(
+            DeploymentCommand(
+                phase="prepare",
+                label="Create target directories over SSH",
+                run_on="remote",
+                command=(
+                    "ssh "
+                    + self._shell_escape(target)
+                    + " "
+                    + self._shell_escape(
+                        "sudo mkdir -p "
+                        + profile.path_roots["config_dir"]
+                        + " "
+                        + profile.path_roots["bin_dir"]
+                        + " "
+                        + profile.path_roots["systemd_dir"]
+                    )
+                ),
+            )
+        )
+        for file in files:
+            commands.append(
+                DeploymentCommand(
+                    phase="copy",
+                    label=f"Copy {file.name}",
+                    run_on="remote",
+                    command=(
+                        "rsync -av "
+                        + self._shell_escape(file.source_path)
+                        + " "
+                        + self._shell_escape(f"{target}:{file.target_path}")
+                    ),
+                )
+            )
+        commands.extend(
+            [
+                DeploymentCommand(
+                    phase="activate",
+                    label="Reload systemd on remote host",
+                    run_on="remote",
+                    command="ssh "
+                    + self._shell_escape(target)
+                    + " "
+                    + self._shell_escape("sudo systemctl daemon-reload"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label="Restart remote services",
+                    run_on="remote",
+                    command="ssh "
+                    + self._shell_escape(target)
+                    + " "
+                    + self._shell_escape("sudo systemctl restart mediamtx.service stream-failover-relay.service"),
+                ),
+                DeploymentCommand(
+                    phase="verify",
+                    label="Verify remote service state",
+                    run_on="remote",
+                    command="ssh "
+                    + self._shell_escape(target)
+                    + " "
+                    + self._shell_escape("sudo systemctl status mediamtx.service stream-failover-relay.service --no-pager"),
+                ),
+            ]
+        )
+        return commands
+
+    def _deployment_warnings(self, config: RelayConfig, profile: DeploymentProfile) -> list[str]:
+        warnings: list[str] = []
+        if config.output.url.startswith("rtmp://") and "@" in config.output.url:
+            warnings.append(
+                "Output URL appears to embed credentials; move this to an environment file before real deployment."
+            )
+        if profile.id != "local-dev":
+            warnings.append(
+                "Remote deployment commands are previews only; validate SSH access, sudo policy, and binary presence on the target host first."
+            )
+        if config.primary_input.protocol != config.backup_input.protocol:
+            warnings.append(
+                "Mixed primary/backup protocols remain a failover risk and may need additional normalization."
+            )
+        if not config.auto_restart:
+            warnings.append(
+                "Auto-restart is disabled in the draft; review whether production should rely on systemd restart behavior."
+            )
+        return warnings
+
     def _unit_name(self, service_name: str) -> str:
         try:
             return self.SERVICE_UNIT_MAP[service_name]
@@ -288,7 +559,7 @@ class RuntimeAdapter:
             output = completed.stdout or completed.stderr
             result["exit_code"] = completed.returncode
             result["preview"] = "\n".join(output.splitlines()[:3])
-        except Exception as exc:  # pragma: no cover - defensive probe path
+        except Exception as exc:  # pragma: no cover
             result["error"] = str(exc)
 
         return result
@@ -324,7 +595,7 @@ class RuntimeAdapter:
                     key, value = line.split("=", 1)
                     parsed[key] = value
             result["state"] = parsed
-        except Exception as exc:  # pragma: no cover - defensive probe path
+        except Exception as exc:  # pragma: no cover
             result["error"] = str(exc)
 
         return result
@@ -345,7 +616,7 @@ class RuntimeAdapter:
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
             }
-        except Exception as exc:  # pragma: no cover - defensive execution path
+        except Exception as exc:  # pragma: no cover
             return {
                 "ok": False,
                 "executed": True,
