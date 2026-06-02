@@ -86,8 +86,8 @@ http://127.0.0.1:3000
 - staged local install layout under `apps/api/data/runtime/install-root/`
 - local deployment profile API and staged-to-target rollout plan endpoint
 - deployment audit endpoint backed by per-bundle manifests and sha256 comparison
-- local preflight endpoint for sudo/systemd/binary/path/rollback readiness checks
-- local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host
+- local preflight endpoint for sudo/systemd/binary/path/rollback/env-readiness checks
+- local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host, with post-apply service-state verification
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
 - UI controls for apply / stage-install / service actions / log fetch
@@ -120,4 +120,4 @@ Design the data model so multi-channel support can be added later.
 
 ## Status
 
-Prototype scaffold complete. Runtime integration, service controls, diagnostics, local install planning, local preflight, true local apply/rollback flow, safe local bundle generation, and deployment audits are now wired. The deploy workflow is intentionally local-host only.
+Prototype scaffold complete. Runtime integration, service controls, diagnostics, local install planning, local preflight, true local apply/rollback flow, safe local bundle generation, deployment audits, relay env readiness checks, and stricter post-apply verification are now wired. The deploy workflow is intentionally local-host only.

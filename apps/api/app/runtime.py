@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -34,6 +35,11 @@ class RuntimeAdapter:
         "mediamtx": "mediamtx.service",
         "stream-failover-relay": "stream-failover-relay.service",
     }
+    REQUIRED_ENV_KEYS = (
+        "STM_PRIMARY_INPUT_URL",
+        "STM_BACKUP_INPUT_URL",
+        "STM_OUTPUT_URL",
+    )
 
     def __init__(self, runtime_dir: str | Path) -> None:
         self.runtime_dir = Path(runtime_dir)
@@ -426,6 +432,36 @@ class RuntimeAdapter:
                     if previous_bundle
                     else "No earlier applied local bundle exists yet; the first true apply will not have a rollback target."
                 ),
+            )
+        )
+
+        env_live = Path(profile.path_roots["config_dir"]) / "streamterminal-relay.env"
+        env_report = self._inspect_live_env_file(env_live)
+        env_status = "pass"
+        if not env_report["exists"]:
+            env_status = "fail" if config.relay_enabled else "pass"
+            env_detail = (
+                f"{env_live} does not exist yet. A true apply can seed it from the example file, but automatic relay activation will fail until you add real local values."
+                if config.relay_enabled
+                else f"{env_live} does not exist yet, but relay service is disabled in the draft."
+            )
+        elif env_report["error"]:
+            env_status = "fail" if config.relay_enabled else "warn"
+            env_detail = f"{env_live} exists but could not be read for validation: {env_report['error']}"
+        elif env_report["missing_keys"]:
+            env_status = "fail" if config.relay_enabled else "warn"
+            env_detail = f"{env_live} is missing required keys: {', '.join(env_report['missing_keys'])}."
+        elif env_report["placeholder_keys"]:
+            env_status = "fail" if config.relay_enabled else "warn"
+            env_detail = f"{env_live} still contains placeholder values for: {', '.join(env_report['placeholder_keys'])}."
+        else:
+            env_detail = f"{env_live} contains the required relay variables and no placeholder markers were detected."
+        checks.append(
+            DeploymentPreflightCheck(
+                name="Live relay env readiness",
+                status=env_status,
+                detail=env_detail,
+                command=f"test -f {env_live}",
             )
         )
 
@@ -860,6 +896,35 @@ class RuntimeAdapter:
             steps.append(self._command_step("Lock down live env file permissions", ["sudo", "-n", "chmod", "600", env_live], chmod_result))
             ok = ok and chmod_result.get("ok", False)
 
+        env_report = self._inspect_live_env_file(Path(env_live))
+        relay_env_ready = env_report["exists"] and env_report["readable"] and not env_report["missing_keys"] and not env_report["placeholder_keys"]
+        if relay_env_ready:
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Verify live relay env",
+                    status="executed",
+                    detail=f"{env_live} contains the required relay variables with non-placeholder values.",
+                )
+            )
+        else:
+            problems: list[str] = []
+            if not env_report["exists"]:
+                problems.append("file missing")
+            if env_report["error"]:
+                problems.append(f"read failed: {env_report['error']}")
+            if env_report["missing_keys"]:
+                problems.append(f"missing keys: {', '.join(env_report['missing_keys'])}")
+            if env_report["placeholder_keys"]:
+                problems.append(f"placeholder values: {', '.join(env_report['placeholder_keys'])}")
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Verify live relay env",
+                    status="failed",
+                    detail=f"{env_live} is not ready for automatic relay start ({'; '.join(problems)}). Edit the live env file locally, then restart stream-failover-relay.service.",
+                )
+            )
+            ok = False
+
         daemon_reload = ["sudo", "-n", systemctl, "daemon-reload"]
         daemon_result = self._run_command(daemon_reload)
         steps.append(self._command_step("Reload systemd", daemon_reload, daemon_result))
@@ -867,23 +932,28 @@ class RuntimeAdapter:
 
         for service_name, unit_name, enabled in [
             ("mediamtx", self.SERVICE_UNIT_MAP["mediamtx"], config.mediamtx_enabled),
-            ("stream-failover-relay", self.SERVICE_UNIT_MAP["stream-failover-relay"], config.relay_enabled),
+            ("stream-failover-relay", self.SERVICE_UNIT_MAP["stream-failover-relay"], config.relay_enabled and relay_env_ready),
         ]:
             command = ["sudo", "-n", systemctl, "enable", "--now", unit_name] if enabled else ["sudo", "-n", systemctl, "disable", "--now", unit_name]
             result = self._run_command(command)
             steps.append(self._command_step(("Enable and start" if enabled else "Disable and stop") + f" {service_name}", command, result))
             ok = ok and result.get("ok", False)
 
-            show_command = [systemctl, "show", unit_name, "--property=ActiveState,UnitFileState,SubState", "--no-pager"]
+            show_command = [systemctl, "show", unit_name, "--property=ActiveState,UnitFileState,SubState,ExecMainStatus,NRestarts", "--no-pager"]
             show_result = self._run_command(show_command)
             state = self._parse_systemctl_show(show_result.get("stdout", ""))
             service_ok = False
             if enabled:
-                service_ok = state.get("ActiveState") == "active"
-                detail = f"ActiveState={state.get('ActiveState', 'unknown')}, UnitFileState={state.get('UnitFileState', 'unknown')}"
+                service_ok = state.get("ActiveState") == "active" and state.get("SubState") == "running"
             else:
                 service_ok = state.get("ActiveState") in {"inactive", "failed", "unknown", None} and state.get("UnitFileState") != "enabled"
-                detail = f"ActiveState={state.get('ActiveState', 'unknown')}, UnitFileState={state.get('UnitFileState', 'unknown')}"
+            detail = (
+                f"ActiveState={state.get('ActiveState', 'unknown')}, "
+                f"SubState={state.get('SubState', 'unknown')}, "
+                f"UnitFileState={state.get('UnitFileState', 'unknown')}, "
+                f"ExecMainStatus={state.get('ExecMainStatus', 'unknown')}, "
+                f"NRestarts={state.get('NRestarts', 'unknown')}"
+            )
             steps.append(
                 DeploymentExecutionStep(
                     label=f"Verify {service_name} state",
@@ -916,6 +986,53 @@ class RuntimeAdapter:
                 key, value = line.split("=", 1)
                 parsed[key] = value
         return parsed
+
+    def _inspect_live_env_file(self, path: Path) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "exists": path.exists(),
+            "readable": False,
+            "missing_keys": [],
+            "placeholder_keys": [],
+            "error": None,
+        }
+        if not path.exists():
+            return report
+
+        try:
+            payload = path.read_text()
+        except PermissionError:
+            result = self._run_command(["sudo", "-n", "cat", str(path)])
+            if not result.get("ok"):
+                report["error"] = result.get("stderr") or result.get("stdout") or "permission denied"
+                return report
+            payload = result.get("stdout", "")
+        except OSError as exc:
+            report["error"] = str(exc)
+            return report
+
+        report["readable"] = True
+        values: dict[str, str] = {}
+        for line in payload.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            values[key.strip()] = value.strip().strip("\"'")
+
+        report["missing_keys"] = [key for key in self.REQUIRED_ENV_KEYS if not values.get(key)]
+        report["placeholder_keys"] = [
+            key
+            for key in self.REQUIRED_ENV_KEYS
+            if self._looks_placeholder_value(values.get(key, ""))
+        ]
+        return report
+
+    @staticmethod
+    def _looks_placeholder_value(value: str) -> bool:
+        normalized = value.strip()
+        if not normalized:
+            return True
+        return bool(re.search(r"(^REPLACE_WITH_|placeholder|example\.invalid)", normalized, re.IGNORECASE))
 
     def _applied_bundle_dirs(self, profile_id: str) -> list[Path]:
         applied: list[Path] = []

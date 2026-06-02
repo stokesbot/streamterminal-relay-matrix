@@ -222,8 +222,8 @@ export default function DeployPage() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="text-xs uppercase tracking-[0.2em] text-slate-400">What changed</div>
             <ul className="mt-4 space-y-3 text-sm text-slate-300">
-              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Preflight now checks sudo, systemd, required binaries, host paths, and rollback readiness on this machine.</li>
-              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">True local apply can install into /etc and /usr/local/bin, reload systemd, and change service state automatically.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Preflight now checks sudo, systemd, required binaries, host paths, rollback readiness, and whether the live relay env file is actually ready for automatic service start.</li>
+              <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">True local apply can install into /etc and /usr/local/bin, reload systemd, and change service state automatically, while refusing to treat a crash-looping relay or placeholder env file as a success.</li>
               <li className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">Rollback now restores the previous applied local bundle instead of just writing another safe preview package.</li>
             </ul>
           </div>
@@ -276,10 +276,10 @@ export default function DeployPage() {
         ) : null}
 
         {execution ? (
-          <section className="rounded-2xl border border-emerald-900 bg-emerald-950/30 p-6">
+          <section className={`rounded-2xl border p-6 ${execution.ok ? "border-emerald-900 bg-emerald-950/30" : "border-rose-900 bg-rose-950/30"}`}>
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Local execution result</p>
+                <p className={`text-xs uppercase tracking-[0.2em] ${execution.ok ? "text-emerald-300" : "text-rose-300"}`}>Local execution result</p>
                 <h2 className="mt-2 text-xl font-semibold text-slate-100">
                   {execution.mode === "preview"
                     ? "Preview generated"
