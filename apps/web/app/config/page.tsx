@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
-import { API_BASE_URL, fetchJson, type RelayConfig } from "@/lib/api";
-
-type ValidationResult = {
-  valid: boolean;
-  issues: Array<{ level: "info" | "warning" | "error"; message: string }>;
-};
+import {
+  API_BASE_URL,
+  sendJson,
+  type ApplyResult,
+  type InstallResult,
+  type RelayConfig,
+  type ValidationResult,
+} from "@/lib/api";
 
 const defaultConfig: RelayConfig = {
   channel_name: "IBM VS Failover",
@@ -62,7 +64,7 @@ function EndpointEditor({
           value={value.protocol}
           onChange={(event) => onChange({ ...value, protocol: event.target.value })}
         >
-          {['rtmp', 'srt', 'rtsp', 'udp', 'file'].map((protocol) => (
+          {["rtmp", "srt", "rtsp", "udp", "file"].map((protocol) => (
             <option key={protocol} value={protocol}>
               {protocol.toUpperCase()}
             </option>
@@ -79,7 +81,7 @@ function EndpointEditor({
           value={value.mode}
           onChange={(event) => onChange({ ...value, mode: event.target.value })}
         >
-          {['pull', 'push', 'listener', 'caller'].map((mode) => (
+          {["pull", "push", "listener", "caller"].map((mode) => (
             <option key={mode} value={mode}>
               {mode}
             </option>
@@ -107,8 +109,12 @@ export default function ConfigPage() {
   useEffect(() => {
     async function load() {
       try {
-        const response = await fetchJson<RelayConfig>("/api/config");
-        setConfig(response);
+        const response = await fetch(`${API_BASE_URL}/api/config`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Load failed: ${response.status}`);
+        }
+        const payload = (await response.json()) as RelayConfig;
+        setConfig(payload);
         setStatus("Loaded draft config from API.");
       } catch {
         setStatus(`API not reachable at ${API_BASE_URL}. Using local defaults.`);
@@ -146,34 +152,47 @@ export default function ConfigPage() {
   );
 
   async function validateConfig() {
-    const response = await fetch(`${API_BASE_URL}/api/config/validate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config),
-    });
-    const payload = (await response.json()) as ValidationResult;
-    setValidation(payload);
-    setStatus(payload.valid ? "Validation passed." : "Validation reported issues.");
+    try {
+      const payload = await sendJson<ValidationResult>("/api/config/validate", "POST", config);
+      setValidation(payload);
+      setStatus(payload.valid ? "Validation passed." : "Validation reported issues.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Validation failed.");
+    }
   }
 
   async function saveDraft() {
     setSaving(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/config/draft`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Save failed: ${response.status}`);
-      }
-
-      const payload = (await response.json()) as RelayConfig;
+      const payload = await sendJson<RelayConfig>("/api/config/draft", "PUT", config);
       setConfig(payload);
       setStatus("Draft saved to backend.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unable to save draft.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function applyDraft() {
+    setSaving(true);
+    try {
+      const payload = await sendJson<ApplyResult>("/api/config/apply", "POST");
+      setStatus(`Draft applied as revision ${payload.version}. ${payload.note}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unable to apply draft.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function stageInstall() {
+    setSaving(true);
+    try {
+      const payload = await sendJson<InstallResult>("/api/runtime/install", "POST");
+      setStatus(`Install layout staged in ${payload.installed_to}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unable to stage install.");
     } finally {
       setSaving(false);
     }
@@ -187,17 +206,24 @@ export default function ConfigPage() {
             <p className="text-xs uppercase tracking-[0.3em] text-sky-300">Configuration</p>
             <h1 className="mt-2 text-3xl font-semibold">Single-channel prototype</h1>
             <p className="mt-3 max-w-2xl text-sm text-slate-400">
-              This page is the first control-plane slice: edit the draft config,
-              validate it with the FastAPI backend, and persist it without touching
-              runtime files by hand.
+              Edit the draft config, validate it with the backend, apply it to generate
+              runtime artifacts, and stage the local install layout without touching a real host yet.
             </p>
           </div>
-          <Link
-            className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
-            href="/"
-          >
-            Back to dashboard
-          </Link>
+          <div className="flex gap-3">
+            <Link
+              className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+              href="/"
+            >
+              Back to dashboard
+            </Link>
+            <Link
+              className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+              href="/diagnostics"
+            >
+              Diagnostics
+            </Link>
+          </div>
         </header>
 
         <section className="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-sm text-slate-300">
@@ -260,7 +286,23 @@ export default function ConfigPage() {
             onClick={saveDraft}
             type="button"
           >
-            {saving ? "Saving..." : "Save draft"}
+            {saving ? "Working..." : "Save draft"}
+          </button>
+          <button
+            className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-100 hover:bg-slate-800 disabled:opacity-50"
+            disabled={saving}
+            onClick={applyDraft}
+            type="button"
+          >
+            Apply draft
+          </button>
+          <button
+            className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-100 hover:bg-slate-800 disabled:opacity-50"
+            disabled={saving}
+            onClick={stageInstall}
+            type="button"
+          >
+            Stage install
           </button>
         </section>
 
