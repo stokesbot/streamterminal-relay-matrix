@@ -117,6 +117,38 @@ echo fake-$0
 exit 0
 """
 
+FAKE_SS_LINES = [
+    "State      Recv-Q Send-Q    Local Address:Port    Peer Address:Port",
+    "LISTEN     0      4096          0.0.0.0:1935         0.0.0.0:*",
+    "LISTEN     0      4096                *:1935                *:*",
+    "LISTEN     0      4096             [::]:1935              [::]:*",
+]
+
+FAKE_SS = (
+    "#!/usr/bin/env python3\n"
+    "import os\n"
+    "import sys\n"
+    "\n"
+    "lines_path = os.environ.get('FAKE_SS_LINES', '')\n"
+    "if not lines_path or not os.path.exists(lines_path):\n"
+    "    sys.exit(0)\n"
+    "with open(lines_path) as handle:\n"
+    "    sys.stdout.write(handle.read())\n"
+)
+
+FAKE_NETSTAT = (
+    "#!/usr/bin/env python3\n"
+    "import os\n"
+    "import sys\n"
+    "\n"
+    "lines_path = os.environ.get('FAKE_SS_LINES', '')\n"
+    "if not lines_path or not os.path.exists(lines_path):\n"
+    "    sys.exit(0)\n"
+    "with open(lines_path) as handle:\n"
+    "    for line in handle:\n"
+    "        sys.stdout.write(line.replace('LISTEN', 'tcp        0      0 '))\n"
+)
+
 
 class TestRuntimeAdapter(RuntimeAdapter):
     def __init__(self, runtime_dir: Path, host_root: Path) -> None:
@@ -150,14 +182,19 @@ class LocalDeployApiTests(unittest.TestCase):
         self.fakebin = self.base / "fakebin"
         self.fakebin.mkdir(parents=True, exist_ok=True)
         self.state_path = self.base / "systemctl-state.json"
+        self.ss_lines_path = self.base / "ss-lines.txt"
+        self.ss_lines_path.write_text("\n".join(FAKE_SS_LINES) + "\n")
         self._write_executable(self.fakebin / "sudo", FAKE_SUDO)
         self._write_executable(self.fakebin / "systemctl", FAKE_SYSTEMCTL)
         self._write_executable(self.fakebin / "mediamtx", FAKE_TOOL)
         self._write_executable(self.fakebin / "stream-failover-relay", FAKE_TOOL)
+        self._write_executable(self.fakebin / "ss", FAKE_SS)
+        self._write_executable(self.fakebin / "netstat", FAKE_NETSTAT)
 
         self.original_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.fakebin}:{self.original_path}"
         os.environ["FAKE_SYSTEMCTL_STATE"] = str(self.state_path)
+        os.environ["FAKE_SS_LINES"] = str(self.ss_lines_path)
 
         data_dir = self.base / "data"
         host_root = self.base / "host"
@@ -181,6 +218,7 @@ class LocalDeployApiTests(unittest.TestCase):
         os.environ["PATH"] = self.original_path
         os.environ.pop("FAKE_SYSTEMCTL_STATE", None)
         os.environ.pop("FAKE_RELAY_ENV", None)
+        os.environ.pop("FAKE_SS_LINES", None)
         self.tempdir.cleanup()
 
     def _write_executable(self, path: Path, content: str) -> None:
@@ -282,6 +320,44 @@ class LocalDeployApiTests(unittest.TestCase):
         relay_state_step = next(item for item in payload["steps"] if item["label"] == "Verify stream-failover-relay state")
         self.assertEqual(relay_state_step["status"], "executed")
         self.assertIn("UnitFileState=disabled", relay_state_step["detail"])
+
+    def test_apply_verifies_mediamtx_listen_port(self) -> None:
+        self._write_valid_live_env()
+
+        apply_response = self.client.post(
+            "/api/deploy/execute",
+            json={"profile_id": "local-system", "execute": True, "action": "apply"},
+        )
+        self.assertEqual(apply_response.status_code, 200)
+        payload = apply_response.json()
+        self.assertTrue(payload["ok"], payload)
+
+        listen_steps = [item for item in payload["steps"] if item["label"] == "Verify mediamtx network listener"]
+        self.assertEqual(len(listen_steps), 1, payload["steps"])
+        listen_step = listen_steps[0]
+        self.assertEqual(listen_step["status"], "executed")
+        self.assertIn("1935", listen_step["detail"])
+
+    def test_apply_fails_when_mediamtx_listen_port_missing(self) -> None:
+        self._write_valid_live_env()
+        self.ss_lines_path.write_text(
+            "State      Recv-Q Send-Q    Local Address:Port    Peer Address:Port\n"
+            "LISTEN     0      4096          0.0.0.0:8080         0.0.0.0:*\n"
+        )
+
+        apply_response = self.client.post(
+            "/api/deploy/execute",
+            json={"profile_id": "local-system", "execute": True, "action": "apply"},
+        )
+        self.assertEqual(apply_response.status_code, 200)
+        payload = apply_response.json()
+        self.assertFalse(payload["ok"], payload)
+
+        listen_steps = [item for item in payload["steps"] if item["label"] == "Verify mediamtx network listener"]
+        self.assertEqual(len(listen_steps), 1, payload["steps"])
+        listen_step = listen_steps[0]
+        self.assertEqual(listen_step["status"], "failed")
+        self.assertIn("1935", listen_step["detail"])
 
 
 if __name__ == "__main__":

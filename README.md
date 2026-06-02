@@ -96,7 +96,7 @@ npm run test:e2e
 - local deployment profile API and staged-to-target rollout plan endpoint
 - deployment audit endpoint backed by per-bundle manifests and sha256 comparison
 - local preflight endpoint for sudo/systemd/binary/path/rollback/env-readiness checks
-- local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host, with post-apply service-state verification
+- local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host, with post-apply service-state and network-listener verification
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
 - UI controls for apply / stage-install / service actions / log fetch

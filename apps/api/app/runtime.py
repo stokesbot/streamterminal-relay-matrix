@@ -972,6 +972,25 @@ class RuntimeAdapter:
             )
             ok = ok and service_ok and show_result.get("ok", False)
 
+        if config.mediamtx_enabled:
+            listen_check = self._verify_listen_port(self.DEFAULT_RTMP_LISTEN_PORT)
+            if listen_check["ok"]:
+                listeners_text = ", ".join(listen_check["listeners"]) or "(none reported)"
+                listen_detail = f"mediamtx is listening on :{listen_check['port']} ({listeners_text})."
+            else:
+                listen_detail = (
+                    f"mediamtx is not listening on :{listen_check['port']} after apply. "
+                    "Check the mediamtx.service journal for bind failures or port conflicts."
+                )
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Verify mediamtx network listener",
+                    status="executed" if listen_check["ok"] else "failed",
+                    detail=listen_detail,
+                )
+            )
+            ok = ok and listen_check["ok"]
+
         return steps, ok
 
     def _command_step(self, label: str, command: list[str], result: dict[str, Any]) -> DeploymentExecutionStep:
@@ -995,6 +1014,84 @@ class RuntimeAdapter:
                 key, value = line.split("=", 1)
                 parsed[key] = value
         return parsed
+
+    DEFAULT_RTMP_LISTEN_PORT = 1935
+
+    def _verify_listen_port(self, port: int) -> dict[str, Any]:
+        """Return a dict describing whether `port` is listening on the local host.
+
+        Tries `ss` first, then `netstat`, then a direct `socket.connect_ex` probe.
+        Each listener is reported with the full `Local Address:Port` so the operator
+        can tell IPv4 from IPv6, wildcard from specific, etc.
+        """
+        listeners: list[str] = []
+        probe_command: list[str] | None = None
+        probe_stdout = ""
+        ss_path = shutil.which("ss")
+        if ss_path:
+            probe_command = [ss_path, "-ltn"]
+            result = self._run_command(probe_command)
+            probe_stdout = result.get("stdout", "")
+            if result.get("ok"):
+                listeners.extend(self._parse_listen_lines(probe_stdout, port=port, format_hint="ss"))
+        if not listeners and shutil.which("netstat"):
+            netstat_path = shutil.which("netstat") or "netstat"
+            probe_command = [netstat_path, "-ltn"]
+            result = self._run_command(probe_command)
+            probe_stdout = result.get("stdout", "")
+            if result.get("ok"):
+                listeners.extend(self._parse_listen_lines(probe_stdout, port=port, format_hint="netstat"))
+        if not listeners and probe_command is None:
+            # No ss / netstat; fall back to a direct TCP probe. This only tells us
+            # "something is listening" or "nothing is listening" without IPv4/IPv6 detail.
+            try:
+                import socket
+
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1.0)
+                    if sock.connect_ex(("127.0.0.1", port)) == 0:
+                        listeners.append(f"127.0.0.1:{port}")
+            except OSError:
+                pass
+        return {
+            "port": port,
+            "ok": bool(listeners),
+            "listeners": listeners,
+            "probe_command": probe_command,
+        }
+
+    @staticmethod
+    def _parse_listen_lines(output: str, *, port: int, format_hint: str) -> list[str]:
+        """Pull `Local Address:Port` lines for a given port from `ss -ltn` or `netstat -ltn`.
+
+        Matches the well-known shapes:
+            ss:      `LISTEN 0 4096 0.0.0.0:1935 0.0.0.0:*`
+                     `LISTEN 0 4096 *:1935 *:*`
+                     `LISTEN 0 4096 [::]:1935 [::]:*`
+            netstat: `tcp 0 0 0.0.0.0:1935 0.0.0.0:* LISTEN`
+                     `tcp6 0 0 [::]:1935 [::]:* LISTEN`
+
+        The local-address column is the 4th whitespace-separated token in both
+        `ss -ltn` and `netstat -ltn` output. We only consider that column to
+        avoid picking up peer addresses that also contain a port.
+        """
+        if not output:
+            return []
+        matched: list[str] = []
+        for raw in output.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(("State", "Proto", "Active", "Recv-Q", "Local", "Address")):
+                continue
+            tokens = line.split()
+            if len(tokens) < 4:
+                continue
+            local_token = tokens[3]
+            # Strip the wildcard v4-mapped form that `netstat` sometimes prints.
+            if local_token.endswith(f":{port}"):
+                matched.append(local_token)
+        return matched
 
     def _inspect_live_env_file(self, path: Path) -> dict[str, Any]:
         report: dict[str, Any] = {
