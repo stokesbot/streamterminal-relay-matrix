@@ -242,3 +242,26 @@ class DiagnosticsResponse(BaseModel):
     latest_revision: ConfigRevision | None = None
     generated_artifacts: list[GeneratedArtifact] = Field(default_factory=list)
     environment: dict[str, Any] = Field(default_factory=dict)
+
+
+SmokeCheckStatus = Literal["pass", "warn", "fail"]
+
+
+class SmokeCheck(BaseModel):
+    name: str
+    status: SmokeCheckStatus
+    detail: str
+
+
+class SmokeSummary(BaseModel):
+    ok: bool
+    pass_count: int
+    warn_count: int
+    fail_count: int
+
+
+class SmokeResponse(BaseModel):
+    generated_at: str
+    ok: bool
+    summary: SmokeSummary
+    checks: list[SmokeCheck] = Field(default_factory=list)

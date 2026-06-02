@@ -108,6 +108,58 @@ echo fake-$0
 exit 0
 `;
 
+const FAKE_SS_LINES = [
+  "State      Recv-Q Send-Q    Local Address:Port    Peer Address:Port",
+  "LISTEN     0      4096          0.0.0.0:1935         0.0.0.0:*",
+  "LISTEN     0      4096                *:1935                *:*",
+  "LISTEN     0      4096             [::]:1935              [::]:*",
+];
+
+const FAKE_SS = `#!/usr/bin/env python3
+import os
+import sys
+
+lines_path = os.environ.get('FAKE_SS_LINES', '')
+if not lines_path or not os.path.exists(lines_path):
+    sys.exit(0)
+with open(lines_path) as handle:
+    sys.stdout.write(handle.read())
+`;
+
+const FAKE_NETSTAT = `#!/usr/bin/env python3
+import os
+import sys
+
+lines_path = os.environ.get('FAKE_SS_LINES', '')
+if not lines_path or not os.path.exists(lines_path):
+    sys.exit(0)
+with open(lines_path) as handle:
+    sys.stdout.write(handle.read())
+`;
+
+const HEALTHY_UNIT_STATE = {
+  "mediamtx.service": {
+    "ActiveState": "active",
+    "SubState": "running",
+    "UnitFileState": "enabled",
+    "ExecMainStatus": "0",
+    "NRestarts": "0",
+  },
+  "stream-failover-relay.service": {
+    "ActiveState": "active",
+    "SubState": "running",
+    "UnitFileState": "enabled",
+    "ExecMainStatus": "0",
+    "NRestarts": "0",
+  },
+};
+
+const SMOKE_PROBE_OVERRIDE = {
+  primary: { ok: true, detail: "tcp://localhost:1935 reachable" },
+  backup: { ok: true, detail: "tcp://localhost:1935 reachable" },
+  output: { ok: false, detail: "tcp://example.invalid:1935 connection refused" },
+};
+
 const VALID_RELAY_ENV_LINES = [
   "STM_PRIMARY_INPUT_URL=rtmp://localhost:1935/live/main",
   "STM_BACKUP_INPUT_URL=rtmp://localhost:1935/live/backup",
@@ -160,23 +212,32 @@ export async function startRelayMatrixServer(options: RelayMatrixServerOptions):
   const dataDir = join(workdir, "data");
   const hostRoot = join(workdir, "host");
   const statePath = join(workdir, "systemctl-state.json");
+  const ssLinesPath = join(workdir, "ss-lines.txt");
   const liveEnvPath = join(hostRoot, "etc", "streamterminal-relay-matrix", "streamterminal-relay.env");
 
   mkdirSync(fakebinDir, { recursive: true });
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(join(hostRoot, "etc", "streamterminal-relay-matrix"), { recursive: true });
 
+  // Pre-seed a healthy smoke state so /api/runtime/smoke is deterministic.
+  writeFileSync(statePath, JSON.stringify(HEALTHY_UNIT_STATE));
+  writeFileSync(ssLinesPath, FAKE_SS_LINES.join("\n") + "\n");
+
   ensureExecutable(join(fakebinDir, "sudo"), FAKE_SUDO);
   ensureExecutable(join(fakebinDir, "systemctl"), FAKE_SYSTEMCTL);
   ensureExecutable(join(fakebinDir, "mediamtx"), FAKE_TOOL);
   ensureExecutable(join(fakebinDir, "stream-failover-relay"), FAKE_TOOL);
+  ensureExecutable(join(fakebinDir, "ss"), FAKE_SS);
+  ensureExecutable(join(fakebinDir, "netstat"), FAKE_NETSTAT);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${fakebinDir}${pathDelim(process.env.PATH)}`,
     FAKE_SYSTEMCTL_STATE: statePath,
     FAKE_RELAY_ENV: liveEnvPath,
+    FAKE_SS_LINES: ssLinesPath,
     STM_TEST_HOST_ROOT: hostRoot,
+    STM_SMOKE_PROBE_OVERRIDE: JSON.stringify(SMOKE_PROBE_OVERRIDE),
     ALLOWED_ORIGINS: JSON.stringify([`http://127.0.0.1:${process.env.E2E_WEB_PORT ?? "3001"}`]),
   };
 

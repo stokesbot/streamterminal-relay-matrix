@@ -22,6 +22,7 @@ from .schemas import (
     ServiceActionResult,
     ServiceLogsResponse,
     ServiceStatus,
+    SmokeResponse,
     ValidationIssue,
     ValidationResult,
 )
@@ -232,6 +233,19 @@ def runtime_status() -> RuntimeStatus:
             "Deployment audit compares file checksums against the latest local bundle",
         ],
     )
+
+
+@app.get("/api/runtime/smoke", response_model=SmokeResponse)
+def runtime_smoke() -> SmokeResponse:
+    """Run a one-shot health probe of the local relay stack.
+
+    Probes systemd state for both services, the mediamtx RTMP listener, and
+    TCP reachability of the primary/backup inputs and the output destination.
+    Returns a structured report suitable for the dashboard and CI.
+    """
+    config = store.load()
+    payload = runtime.runtime_smoke(config)
+    return SmokeResponse.model_validate(payload)
 
 
 @app.post("/api/services/{service_name}/action", response_model=ServiceActionResult)
