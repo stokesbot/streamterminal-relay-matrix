@@ -187,6 +187,8 @@ class LocalDeployApiTests(unittest.TestCase):
         self.assertTrue(live_config_path.exists())
         first_contents = live_config_path.read_text()
         self.assertIn("paths:", first_contents)
+        self.assertIn("  live/main:", first_contents)
+        self.assertIn("  live/backup:", first_contents)
 
         updated_config = RelayConfig.model_validate(DEFAULT_CONFIG.model_dump(mode="json"))
         updated_config.channel_name = "Rollback target"

@@ -8,6 +8,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .schemas import (
     DeployExecuteResponse,
@@ -1175,8 +1176,9 @@ class RuntimeAdapter:
 
     @staticmethod
     def _path_name(endpoint: Any, fallback: str) -> str:
-        tail = endpoint.url.rstrip("/").split("/")[-1]
-        return tail or fallback
+        parsed = urlparse(endpoint.url)
+        path = parsed.path.strip("/")
+        return path or fallback
 
     @staticmethod
     def _looks_sensitive_url(url: str) -> bool:
