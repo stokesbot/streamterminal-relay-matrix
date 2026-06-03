@@ -1,31 +1,30 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
+export type SRTConfig = {
+  latency_ms: number;
+  passphrase?: string | null;
+  pbkeylen: 16 | 24 | 32;
+  max_bandwidth: number;
+  stream_id?: string | null;
+};
+
+export type StreamEndpoint = {
+  label: string;
+  protocol: string;
+  url: string;
+  mode: string;
+  enabled: boolean;
+  srt_config?: SRTConfig | null;
+};
+
 export type RelayConfig = {
   channel_name: string;
   mediamtx_enabled: boolean;
   relay_enabled: boolean;
   auto_restart: boolean;
-  primary_input: {
-    label: string;
-    protocol: string;
-    url: string;
-    mode: string;
-    enabled: boolean;
-  };
-  backup_input: {
-    label: string;
-    protocol: string;
-    url: string;
-    mode: string;
-    enabled: boolean;
-  };
-  output: {
-    label: string;
-    protocol: string;
-    url: string;
-    mode: string;
-    enabled: boolean;
-  };
+  primary_input: StreamEndpoint;
+  backup_input: StreamEndpoint;
+  output: StreamEndpoint;
 };
 
 export type RuntimeStatus = {
@@ -399,3 +398,25 @@ export async function sendJson<T>(path: string, method: string, body?: unknown):
 }
 
 export { API_BASE_URL };
+
+export async function deployConfiguration(
+  profileId: string = "local-system"
+): Promise<DeployExecuteResponse> {
+  return sendJson<DeployExecuteResponse>("/api/deploy/execute", "POST", {
+    profile_id: profileId,
+    action: "apply",
+    execute: true,
+  });
+}
+
+export async function getDeploymentPlan(
+  profileId: string = "local-system"
+): Promise<DeploymentPlan> {
+  return fetchJson<DeploymentPlan>(`/api/deploy/plan?profile_id=${profileId}`);
+}
+
+export async function getDeploymentPreflight(
+  profileId: string = "local-system"
+): Promise<DeploymentPreflight> {
+  return fetchJson<DeploymentPreflight>(`/api/deploy/preflight?profile_id=${profileId}`);
+}

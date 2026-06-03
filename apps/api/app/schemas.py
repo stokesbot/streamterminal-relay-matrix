@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Protocol = Literal["rtmp", "srt", "rtsp", "udp", "file"]
 ConnectionMode = Literal["pull", "push", "listener", "caller"]
@@ -16,12 +16,30 @@ DeploymentStepStatus = Literal["preview", "created", "skipped", "executed", "fai
 DeploymentProfileSource = Literal["builtin"]
 
 
+class SRTConfig(BaseModel):
+    """SRT-specific configuration options."""
+
+    latency_ms: int = Field(default=120, ge=20, le=8000, description="Latency in milliseconds")
+    passphrase: str | None = Field(default=None, min_length=10, max_length=79, description="Encryption passphrase (10-79 chars)")
+    pbkeylen: int = Field(default=16, description="Encryption key length in bytes (16, 24, or 32)")
+    max_bandwidth: int = Field(default=-1, description="Maximum bandwidth in bytes/sec (-1 = unlimited)")
+    stream_id: str | None = Field(default=None, max_length=512, description="Stream ID for routing")
+
+    @field_validator("pbkeylen")
+    @classmethod
+    def validate_pbkeylen(cls, value: int) -> int:
+        if value not in (16, 24, 32):
+            raise ValueError("pbkeylen must be 16, 24, or 32")
+        return value
+
+
 class StreamEndpoint(BaseModel):
     label: str = Field(min_length=1, max_length=64)
     protocol: Protocol = "rtmp"
     url: str = Field(min_length=1)
     mode: ConnectionMode = "pull"
     enabled: bool = True
+    srt_config: SRTConfig | None = Field(default=None, description="SRT-specific configuration (only used when protocol='srt')")
 
 
 class RelayConfig(BaseModel):

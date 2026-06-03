@@ -58,22 +58,66 @@ class RuntimeAdapter:
 
         primary_path = self._path_name(config.primary_input, "main")
         backup_path = self._path_name(config.backup_input, "backup")
-        listen_address = self._rtmp_listen_address(config)
 
-        return (
-            "logLevel: info\n"
-            "rtmp: yes\n"
-            f"rtmpAddress: {listen_address}\n"
-            "hls: no\n"
-            "webrtc: no\n"
-            "srt: no\n"
-            "api: no\n"
-            "paths:\n"
-            f"  {primary_path}:\n"
-            "    source: publisher\n"
-            f"  {backup_path}:\n"
-            "    source: publisher\n"
-        )
+        # Determine which protocols are needed
+        protocols_used = {
+            config.primary_input.protocol,
+            config.backup_input.protocol,
+            config.output.protocol
+        }
+
+        # Build protocol configuration
+        config_lines = ["logLevel: info\n"]
+
+        # RTMP configuration
+        if "rtmp" in protocols_used:
+            listen_address = self._rtmp_listen_address(config)
+            config_lines.append("rtmp: yes\n")
+            config_lines.append(f"rtmpAddress: {listen_address}\n")
+        else:
+            config_lines.append("rtmp: no\n")
+
+        # SRT configuration
+        if "srt" in protocols_used:
+            srt_address = self._srt_listen_address(config)
+            config_lines.append("srt: yes\n")
+            config_lines.append(f"srtAddress: {srt_address}\n")
+        else:
+            config_lines.append("srt: no\n")
+
+        # Other protocols
+        config_lines.append("hls: no\n")
+        config_lines.append("webrtc: no\n")
+        config_lines.append("api: no\n")
+        config_lines.append("paths:\n")
+
+        # Primary input path
+        config_lines.append(f"  {primary_path}:\n")
+        if config.primary_input.protocol == "srt" and config.primary_input.mode == "caller":
+            # SRT caller mode - MediaMTX pulls from remote
+            srt_url = self._build_srt_url(config.primary_input)
+            config_lines.append(f"    source: {srt_url}\n")
+        else:
+            # Publisher mode (RTMP push or SRT listener)
+            config_lines.append("    source: publisher\n")
+            if config.primary_input.protocol == "srt" and config.primary_input.srt_config:
+                if config.primary_input.srt_config.passphrase:
+                    config_lines.append(f"    srtPublishPassphrase: {config.primary_input.srt_config.passphrase}\n")
+
+        # Backup input path
+        config_lines.append(f"  {backup_path}:\n")
+        if config.backup_input.protocol == "srt" and config.backup_input.mode == "caller":
+            # SRT caller mode - MediaMTX pulls from remote
+            srt_url = self._build_srt_url(config.backup_input)
+            config_lines.append(f"    source: {srt_url}\n")
+        else:
+            # Publisher mode (RTMP push or SRT listener)
+            config_lines.append("    source: publisher\n")
+            if config.backup_input.protocol == "srt" and config.backup_input.srt_config:
+                if config.backup_input.srt_config.passphrase:
+                    config_lines.append(f"    srtPublishPassphrase: {config.backup_input.srt_config.passphrase}\n")
+
+        return "".join(config_lines)
 
     def relay_command(self, _: RelayConfig) -> str:
         return "\n".join(
@@ -1893,15 +1937,27 @@ class RuntimeAdapter:
                 ),
                 DeploymentCommand(
                     phase="activate",
-                    label=("Enable and start mediamtx" if config.mediamtx_enabled else "Disable and stop mediamtx"),
+                    label=("Enable mediamtx" if config.mediamtx_enabled else "Disable mediamtx"),
                     run_on="local",
-                    command=("sudo systemctl enable --now mediamtx.service" if config.mediamtx_enabled else "sudo systemctl disable --now mediamtx.service"),
+                    command=("sudo systemctl enable mediamtx.service" if config.mediamtx_enabled else "sudo systemctl disable mediamtx.service"),
                 ),
                 DeploymentCommand(
                     phase="activate",
-                    label=("Enable and start stream-failover-relay" if config.relay_enabled else "Disable and stop stream-failover-relay"),
+                    label=("Restart mediamtx" if config.mediamtx_enabled else "Stop mediamtx"),
                     run_on="local",
-                    command=("sudo systemctl enable --now stream-failover-relay.service" if config.relay_enabled else "sudo systemctl disable --now stream-failover-relay.service"),
+                    command=("sudo systemctl restart mediamtx.service" if config.mediamtx_enabled else "sudo systemctl stop mediamtx.service"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label=("Enable stream-failover-relay" if config.relay_enabled else "Disable stream-failover-relay"),
+                    run_on="local",
+                    command=("sudo systemctl enable stream-failover-relay.service" if config.relay_enabled else "sudo systemctl disable stream-failover-relay.service"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label=("Restart stream-failover-relay" if config.relay_enabled else "Stop stream-failover-relay"),
+                    run_on="local",
+                    command=("sudo systemctl restart stream-failover-relay.service" if config.relay_enabled else "sudo systemctl stop stream-failover-relay.service"),
                 ),
                 DeploymentCommand(
                     phase="verify",
@@ -2107,6 +2163,62 @@ class RuntimeAdapter:
         if parsed.scheme == "rtmp" and port is None:
             port = 1935
         return f":{port}" if port else ":1935"
+    @staticmethod
+    def _srt_listen_address(config: RelayConfig) -> str:
+        """Determine SRT listen address from configuration"""
+        # Check primary input first
+        if config.primary_input.protocol == "srt":
+            parsed = urlparse(config.primary_input.url)
+            port = parsed.port if parsed.port else 8890
+            return f":{port}"
+        # Check backup input
+        if config.backup_input.protocol == "srt":
+            parsed = urlparse(config.backup_input.url)
+            port = parsed.port if parsed.port else 8890
+            return f":{port}"
+        # Default SRT port
+        return ":8890"
+
+    @staticmethod
+    def _build_srt_url(endpoint: Any) -> str:
+        """Build SRT URL with query parameters from SRT config"""
+        base_url = endpoint.url
+
+        if not endpoint.srt_config:
+            return base_url
+
+        # Parse existing URL
+        parsed = urlparse(base_url)
+
+        # Build query parameters
+        params = []
+
+        if endpoint.srt_config.stream_id:
+            params.append(f"streamid={endpoint.srt_config.stream_id}")
+
+        if endpoint.srt_config.latency_ms != 120:  # Only add if not default
+            params.append(f"latency={endpoint.srt_config.latency_ms}")
+
+        if endpoint.srt_config.passphrase:
+            params.append(f"passphrase={endpoint.srt_config.passphrase}")
+
+        if endpoint.srt_config.pbkeylen != 16:  # Only add if not default
+            params.append(f"pbkeylen={endpoint.srt_config.pbkeylen}")
+
+        if endpoint.srt_config.max_bandwidth != -1:  # Only add if not unlimited
+            params.append(f"maxbw={endpoint.srt_config.max_bandwidth}")
+
+        # Combine with existing query string
+        if params:
+            query_string = "&".join(params)
+            if parsed.query:
+                query_string = f"{parsed.query}&{query_string}"
+
+            # Rebuild URL with query parameters
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{query_string}"
+
+        return base_url
+
 
     @staticmethod
     def _looks_sensitive_url(url: str) -> bool:
