@@ -11,6 +11,9 @@ import {
   type DeploymentPlan,
   type DeploymentPreflight,
   type DeploymentProfile,
+  type HostSnapshotListResponse,
+  type HostSnapshotRestoreResult,
+  type HostSnapshotSummary,
 } from "@/lib/api";
 
 const phases: Array<DeploymentPlan["commands"][number]["phase"]> = [
@@ -25,6 +28,7 @@ export default function DeployPage() {
   const [preflight, setPreflight] = useState<DeploymentPreflight | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
   const [audit, setAudit] = useState<DeploymentAudit | null>(null);
+  const [snapshots, setSnapshots] = useState<HostSnapshotSummary[]>([]);
   const [execution, setExecution] = useState<DeployExecuteResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,6 +37,8 @@ export default function DeployPage() {
   const [runningApply, setRunningApply] = useState(false);
   const [runningRollback, setRunningRollback] = useState(false);
   const [runningBundle, setRunningBundle] = useState(false);
+  const [restoreBanner, setRestoreBanner] = useState<string | null>(null);
+  const [runningRestoreId, setRunningRestoreId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,17 +46,25 @@ export default function DeployPage() {
     async function loadDeploymentData() {
       setLoading(true);
       try {
-        const [profilesPayload, preflightPayload, planPayload, auditPayload] = await Promise.all([
+        const [
+          profilesPayload,
+          preflightPayload,
+          planPayload,
+          auditPayload,
+          snapshotsPayload,
+        ] = await Promise.all([
           fetchJson<DeploymentProfile[]>("/api/deploy/profiles"),
           fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
           fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
           fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
+          fetchJson<HostSnapshotListResponse>("/api/deploy/host-snapshots"),
         ]);
         if (!cancelled) {
           setProfile(profilesPayload[0] ?? null);
           setPreflight(preflightPayload);
           setPlan(planPayload);
           setAudit(auditPayload);
+          setSnapshots(snapshotsPayload.snapshots ?? []);
           setExecution(null);
           setError(null);
         }
@@ -125,6 +139,9 @@ export default function DeployPage() {
       });
       setExecution(payload);
       await refreshDeploymentState();
+      // Re-pull the snapshot list because apply/rollback capture a new snapshot.
+      const snapshotList = await fetchJson<HostSnapshotListResponse>("/api/deploy/host-snapshots");
+      setSnapshots(snapshotList.snapshots ?? []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run local deployment action.");
@@ -138,6 +155,34 @@ export default function DeployPage() {
       } else {
         setRunningRollback(false);
       }
+    }
+  }
+
+  async function restoreSnapshot(snapshot: HostSnapshotSummary) {
+    if (typeof window !== "undefined" && !window.confirm(
+      `Restore snapshot ${snapshot.id} (${snapshot.file_count} files, ${snapshot.total_bytes} bytes)? This will overwrite the live /etc/streamterminal-relay-matrix, /etc/systemd/system, and /usr/local/bin files.`,
+    )) {
+      return;
+    }
+    setRunningRestoreId(snapshot.id);
+    setRestoreBanner(null);
+    try {
+      const payload = await sendJson<HostSnapshotRestoreResult>(
+        "/api/deploy/restore-snapshot",
+        "POST",
+        { snapshot_id: snapshot.id, execute: true },
+      );
+      const restoredCount = payload.restored?.length ?? 0;
+      setRestoreBanner(
+        `Restored snapshot ${snapshot.id} (${restoredCount} files) onto ${payload.host_root}.`,
+      );
+      await refreshDeploymentState();
+    } catch (err) {
+      setRestoreBanner(
+        err instanceof Error ? `Restore failed: ${err.message}` : "Unable to restore snapshot.",
+      );
+    } finally {
+      setRunningRestoreId(null);
     }
   }
 
@@ -368,6 +413,63 @@ export default function DeployPage() {
             </div>
           </section>
         ) : null}
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Local host snapshots</h2>
+              <p className="mt-2 text-sm text-slate-400">
+                Captured automatically before every apply or rollback. Restore one to roll the
+                live /etc, /etc/systemd/system, and /usr/local/bin files back to a known state.
+              </p>
+            </div>
+            {restoreBanner ? (
+              <div
+                data-testid="restore-banner"
+                className="rounded-lg border border-emerald-900 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-200"
+              >
+                {restoreBanner}
+              </div>
+            ) : null}
+          </div>
+          {snapshots.length === 0 ? (
+            <p className="mt-4 text-sm text-slate-500">
+              No snapshots yet. Run a local apply to capture one.
+            </p>
+          ) : (
+            <ul className="mt-4 space-y-3 text-sm text-slate-200" data-testid="host-snapshot-list">
+              {snapshots
+                .slice()
+                .reverse()
+                .map((snap) => (
+                  <li
+                    key={snap.id}
+                    className="rounded-lg border border-slate-800 bg-slate-950 p-4"
+                    data-testid="host-snapshot-row"
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <div className="font-mono text-sm text-slate-100">{snap.id}</div>
+                        <div className="mt-1 text-xs text-slate-400">
+                          trigger={snap.trigger} · created_at={snap.created_at} · files={snap.file_count} ·{" "}
+                          bytes={snap.total_bytes}
+                        </div>
+                        <div className="mt-1 break-all text-xs text-slate-500">{snap.host_root}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void restoreSnapshot(snap)}
+                        disabled={runningRestoreId === snap.id}
+                        className="rounded-lg border border-amber-700 bg-amber-950 px-3 py-2 text-xs font-medium uppercase tracking-[0.2em] text-amber-100 hover:bg-amber-900 disabled:opacity-50"
+                      >
+                        {runningRestoreId === snap.id ? "Restoring..." : "Restore"}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+            </ul>
+          )}
+        </section>
 
         {plan ? (
           <>

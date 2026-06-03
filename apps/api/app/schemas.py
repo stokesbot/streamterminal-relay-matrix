@@ -265,3 +265,31 @@ class SmokeResponse(BaseModel):
     ok: bool
     summary: SmokeSummary
     checks: list[SmokeCheck] = Field(default_factory=list)
+
+
+class HostSnapshotFile(BaseModel):
+    path: str
+    size: int
+    sha256: str
+
+
+class HostSnapshotSummary(BaseModel):
+    id: str
+    created_at: str
+    trigger: str
+    host_root: str
+    manifest_path: str
+    file_count: int
+    total_bytes: int
+    note: str | None = None
+
+
+class HostSnapshotListResponse(BaseModel):
+    generated_at: str
+    snapshots: list[HostSnapshotSummary] = Field(default_factory=list)
+
+
+class HostSnapshotRestoreRequest(BaseModel):
+    snapshot_id: str
+    execute: bool = True
+    note: str | None = None

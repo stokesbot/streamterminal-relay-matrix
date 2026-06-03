@@ -192,6 +192,40 @@ export type SmokeResponse = {
   checks: SmokeCheck[];
 };
 
+export type HostSnapshotSummary = {
+  id: string;
+  created_at: string;
+  trigger: string;
+  host_root: string;
+  manifest_path: string;
+  file_count: number;
+  total_bytes: number;
+  note: string | null;
+};
+
+export type HostSnapshotListResponse = {
+  generated_at: string;
+  snapshots: HostSnapshotSummary[];
+};
+
+export type HostSnapshotRestoreResult = {
+  ok: boolean;
+  executed: boolean;
+  snapshot_id: string;
+  host_root: string;
+  restored?: Array<{
+    path: string;
+    command: string;
+    ok: boolean;
+    exit_code: number;
+  }>;
+  files?: Array<{
+    path: string;
+    size: number;
+    sha256: string;
+  }>;
+};
+
 export type DeploymentAudit = {
   profile: DeploymentProfile;
   generated_at: string;

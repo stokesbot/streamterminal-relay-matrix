@@ -49,6 +49,8 @@ class RuntimeAdapter:
         self.install_root.mkdir(parents=True, exist_ok=True)
         self.bundle_root = self.runtime_dir / "deploy-bundles"
         self.bundle_root.mkdir(parents=True, exist_ok=True)
+        self.snapshot_root = self.runtime_dir / "host-snapshots"
+        self.snapshot_root.mkdir(parents=True, exist_ok=True)
 
     def mediamtx_config(self, config: RelayConfig) -> str:
         if not config.mediamtx_enabled:
@@ -1039,6 +1041,152 @@ class RuntimeAdapter:
         payload["success"] = success
         manifest.write_text(json.dumps(payload, indent=2))
 
+    # ----- Host snapshot subsystem -----
+    # Snapshots are captured at the very start of an apply (or before a
+    # rollback swap-back) and persisted under
+    # `runtime/host-snapshots/<id>/` with a `manifest.json` and a
+    # `files/` tree that mirrors the host-side relative paths.
+    SNAPSHOT_TRIGGERS = {"apply", "rollback", "manual"}
+
+    def _snapshot_id(self) -> str:
+        return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+    def capture_host_snapshot(
+        self,
+        *,
+        trigger: str,
+        host_root: str,
+        note: str | None = None,
+        source_bundle: str | None = None,
+    ) -> dict[str, Any]:
+        if trigger not in self.SNAPSHOT_TRIGGERS:
+            raise ValueError(f"Unknown snapshot trigger: {trigger}")
+
+        snapshot_id = self._snapshot_id()
+        snapshot_dir = self.snapshot_root / snapshot_id
+        files_dir = snapshot_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+
+        host_root_path = Path(host_root)
+        candidates: list[Path] = []
+        for sub in (
+            "etc/streamterminal-relay-matrix",
+            "etc/systemd/system",
+            "usr/local/bin",
+        ):
+            host_dir = host_root_path / sub
+            if host_dir.exists():
+                for entry in sorted(host_dir.rglob("*")):
+                    if entry.is_file():
+                        candidates.append(entry)
+
+        manifest_files: list[dict[str, Any]] = []
+        for source in candidates:
+            try:
+                relative = source.relative_to(host_root_path)
+            except ValueError:
+                continue
+            dest = files_dir / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            data = source.read_bytes()
+            dest.write_bytes(data)
+            manifest_files.append(
+                {
+                    "path": str(relative),
+                    "size": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+
+        manifest = {
+            "id": snapshot_id,
+            "created_at": datetime.now(UTC).isoformat(),
+            "trigger": trigger,
+            "host_root": host_root,
+            "source_bundle": source_bundle,
+            "note": note,
+            "files": manifest_files,
+        }
+        (snapshot_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return {
+            "id": snapshot_id,
+            "snapshot_dir": str(snapshot_dir),
+            "manifest": manifest,
+        }
+
+    def list_host_snapshots(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        if not self.snapshot_root.exists():
+            return results
+        for manifest_path in sorted(self.snapshot_root.glob("*/manifest.json")):
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            files = manifest.get("files", [])
+            results.append(
+                {
+                    "id": manifest.get("id", manifest_path.parent.name),
+                    "created_at": manifest.get("created_at", ""),
+                    "trigger": manifest.get("trigger", "unknown"),
+                    "host_root": manifest.get("host_root", ""),
+                    "manifest_path": str(manifest_path),
+                    "file_count": len(files),
+                    "total_bytes": sum(int(f.get("size", 0)) for f in files),
+                    "note": manifest.get("note"),
+                }
+            )
+        return results
+
+    def _read_snapshot_manifest(self, snapshot_id: str) -> dict[str, Any]:
+        if ".." in snapshot_id or "/" in snapshot_id or "\\" in snapshot_id:
+            raise ValueError(f"Invalid snapshot id: {snapshot_id}")
+        manifest_path = self.snapshot_root / snapshot_id / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Snapshot not found: {snapshot_id}")
+        return json.loads(manifest_path.read_text())
+
+    def restore_host_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        manifest = self._read_snapshot_manifest(snapshot_id)
+        host_root = manifest["host_root"]
+        files = manifest["files"]
+        snapshot_files_dir = self.snapshot_root / snapshot_id / "files"
+        if not snapshot_files_dir.exists():
+            raise FileNotFoundError(f"Snapshot files missing: {snapshot_id}")
+        restored: list[dict[str, Any]] = []
+        for entry in files:
+            rel = entry["path"]
+            source = snapshot_files_dir / rel
+            if not source.exists():
+                continue
+            target = Path(host_root) / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            mode = "0755" if rel.endswith(".sh") else "0644"
+            install = self._run_command(
+                [
+                    "sudo",
+                    "-n",
+                    "install",
+                    "-m",
+                    mode,
+                    str(source),
+                    str(target),
+                ]
+            )
+            restored.append(
+                {
+                    "path": rel,
+                    "command": " ".join(install.get("command", [])),
+                    "ok": bool(install.get("ok")),
+                    "exit_code": install.get("exit_code", 1),
+                }
+            )
+        return {
+            "snapshot_id": snapshot_id,
+            "host_root": host_root,
+            "restored": restored,
+        }
+
     def _apply_bundle_to_host(
         self,
         plan: DeploymentPlanResponse,
@@ -1050,6 +1198,35 @@ class RuntimeAdapter:
         systemctl = shutil.which("systemctl") or "systemctl"
         steps: list[DeploymentExecutionStep] = []
         ok = True
+
+        # Capture the on-host state before any writes so an operator can
+        # restore the previous config files if this apply breaks the stack.
+        host_root_for_snapshot = str(Path(profile.path_roots["config_dir"]).parent.parent)
+        try:
+            snap = self.capture_host_snapshot(
+                trigger="apply",
+                host_root=host_root_for_snapshot,
+                source_bundle=str(bundle_dir),
+            )
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Snapshot host files before apply",
+                    status="executed",
+                    detail=(
+                        f"Captured pre-apply snapshot snapshot_id={snap['id']} "
+                        f"with {len(snap['manifest']['files'])} files from {host_root_for_snapshot}."
+                    ),
+                )
+            )
+        except Exception as exc:  # pragma: no cover - filesystem failure path
+            ok = False
+            steps.append(
+                DeploymentExecutionStep(
+                    label="Snapshot host files before apply",
+                    status="failed",
+                    detail=f"Could not capture pre-apply snapshot: {exc}",
+                )
+            )
 
         mkdir_command = ["sudo", "-n", "mkdir", "-p", profile.path_roots["config_dir"], profile.path_roots["bin_dir"], profile.path_roots["systemd_dir"]]
         result = self._run_command(mkdir_command)
