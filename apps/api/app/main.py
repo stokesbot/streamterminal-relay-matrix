@@ -57,6 +57,38 @@ def validate_config(config: RelayConfig) -> ValidationResult:
     if not config.output.url.startswith(("rtmp://", "srt://", "rtsp://", "udp://", "file://")):
         issues.append(ValidationIssue(level="error", message="Output URL must include a supported protocol prefix."))
 
+    # SRT-specific validation
+    for endpoint_name, endpoint in [("primary input", config.primary_input), ("backup input", config.backup_input), ("output", config.output)]:
+        if endpoint.protocol == "srt":
+            # Validate SRT URL format
+            if not endpoint.url.startswith("srt://"):
+                issues.append(ValidationIssue(level="error", message=f"{endpoint_name.capitalize()}: SRT URL must start with 'srt://'"))
+
+            # Validate connection mode
+            if endpoint.mode not in ("caller", "listener"):
+                issues.append(ValidationIssue(level="error", message=f"{endpoint_name.capitalize()}: SRT mode must be 'caller' or 'listener'"))
+
+            # Validate SRT config if present
+            if endpoint.srt_config:
+                # Validate latency
+                if endpoint.srt_config.latency_ms < 20 or endpoint.srt_config.latency_ms > 8000:
+                    issues.append(ValidationIssue(level="warning", message=f"{endpoint_name.capitalize()}: SRT latency should be between 20-8000ms (current: {endpoint.srt_config.latency_ms}ms)"))
+
+                # Validate passphrase length
+                if endpoint.srt_config.passphrase:
+                    if len(endpoint.srt_config.passphrase) < 10 or len(endpoint.srt_config.passphrase) > 79:
+                        issues.append(ValidationIssue(level="error", message=f"{endpoint_name.capitalize()}: SRT passphrase must be 10-79 characters"))
+
+                # Validate encryption key length
+                if endpoint.srt_config.pbkeylen not in (16, 24, 32):
+                    issues.append(ValidationIssue(level="error", message=f"{endpoint_name.capitalize()}: SRT pbkeylen must be 16, 24, or 32 bytes"))
+
+                # Warn about encryption
+                if endpoint.srt_config.passphrase:
+                    issues.append(ValidationIssue(level="info", message=f"{endpoint_name.capitalize()}: SRT encryption enabled with {endpoint.srt_config.pbkeylen * 8}-bit key"))
+                else:
+                    issues.append(ValidationIssue(level="warning", message=f"{endpoint_name.capitalize()}: SRT encryption not enabled (passphrase not set)"))
+
     return ValidationResult(valid=not any(issue.level == "error" for issue in issues), issues=issues)
 
 
