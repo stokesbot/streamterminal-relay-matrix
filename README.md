@@ -112,6 +112,7 @@ npm run test:e2e
 
 See:
 
+- `docs/operations.md` — operator runbook (first-boot, reboot, rollback, smoke, etc.)
 - `docs/product-vision.md`
 - `docs/architecture.md`
 - `docs/mvp-plan.md`
