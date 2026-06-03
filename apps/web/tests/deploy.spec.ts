@@ -90,3 +90,35 @@ test("deploy page exposes host snapshots list and a restore action", async ({ pa
   // No `Restored snapshot` banner should appear because we cancelled.
   await expect(page.getByTestId("restore-banner")).toHaveCount(0);
 });
+
+test("deploy page shows bundle inventory and exposes a prune action", async ({ page }) => {
+  if (!backend) throw new Error("Backend server was not initialized");
+
+  // Trigger an apply so at least one bundle exists in the inventory.
+  const applyResponse = await page.request.post(`${backend.apiBaseUrl}/api/deploy/execute`, {
+    data: { profile_id: "local-system", execute: true, action: "apply" },
+  });
+  expect(applyResponse.ok()).toBeTruthy();
+
+  await page.goto("/deploy");
+
+  // The deploy page now shows a Bundle inventory section.
+  const inventorySection = page.getByTestId("bundle-inventory-section");
+  await expect(inventorySection).toBeVisible();
+  await expect(inventorySection.getByText("Bundles")).toBeVisible();
+  await expect(inventorySection.getByText("Staging dirs")).toBeVisible();
+
+  // Bundle count tile should be at least 1 after the apply above.
+  const bundleCount = inventorySection.getByTestId("bundle-count");
+  await expect(bundleCount).toBeVisible();
+  const countText = (await bundleCount.textContent()) ?? "";
+  expect(countText).toMatch(/Bundles\s*(\d+)/);
+
+  // The prune button should exist; clicking it (after confirming) should
+  // produce a banner.
+  const pruneButton = page.getByTestId("prune-bundles-button");
+  await expect(pruneButton).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await pruneButton.click();
+  await expect(page.getByTestId("prune-banner")).toBeVisible({ timeout: 10_000 });
+});

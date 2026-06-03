@@ -293,3 +293,51 @@ class HostSnapshotRestoreRequest(BaseModel):
     snapshot_id: str
     execute: bool = True
     note: str | None = None
+
+
+class BundleInventoryItem(BaseModel):
+    name: str
+    path: str
+    size_bytes: int
+    file_count: int
+    modified_at: str
+    mtime: float
+    host_touched: bool = False
+    mode: str | None = None
+
+
+class BundleInventoryResponse(BaseModel):
+    generated_at: str
+    bundle_root: str
+    install_root: str
+    bundle_count: int
+    bundle_total_bytes: int
+    staging_count: int
+    staging_total_bytes: int
+    bundles: list[BundleInventoryItem] = Field(default_factory=list)
+
+
+class BundlePruneRemovedEntry(BaseModel):
+    path: str
+    size_bytes: int
+
+
+class BundlePruneResponse(BaseModel):
+    ok: bool
+    executed: bool
+    keep_apply: int
+    keep_stage: int
+    bundles_before: int
+    staging_before: int
+    removed_bundles: list[BundlePruneRemovedEntry] = Field(default_factory=list)
+    removed_staging: list[BundlePruneRemovedEntry] = Field(default_factory=list)
+    bundles_after: int
+    staging_after: int
+    reclaimed_bytes: int
+    last_pruned_at: str
+
+
+class BundlePruneRequest(BaseModel):
+    keep_apply: int | None = None
+    keep_stage: int | None = None
+    execute: bool = True

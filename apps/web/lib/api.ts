@@ -226,6 +226,48 @@ export type HostSnapshotRestoreResult = {
   }>;
 };
 
+export type BundleInventoryItem = {
+  name: string;
+  path: string;
+  size_bytes: number;
+  file_count: number;
+  modified_at: string;
+  mtime: number;
+  host_touched: boolean;
+  mode: string | null;
+};
+
+export type BundleInventoryResponse = {
+  generated_at: string;
+  bundle_root: string;
+  install_root: string;
+  bundle_count: number;
+  bundle_total_bytes: number;
+  staging_count: number;
+  staging_total_bytes: number;
+  bundles: BundleInventoryItem[];
+};
+
+export type BundlePruneRemovedEntry = {
+  path: string;
+  size_bytes: number;
+};
+
+export type BundlePruneResponse = {
+  ok: boolean;
+  executed: boolean;
+  keep_apply: number;
+  keep_stage: number;
+  bundles_before: number;
+  staging_before: number;
+  removed_bundles: BundlePruneRemovedEntry[];
+  removed_staging: BundlePruneRemovedEntry[];
+  bundles_after: number;
+  staging_after: number;
+  reclaimed_bytes: number;
+  last_pruned_at: string;
+};
+
 export type DeploymentAudit = {
   profile: DeploymentProfile;
   generated_at: string;
