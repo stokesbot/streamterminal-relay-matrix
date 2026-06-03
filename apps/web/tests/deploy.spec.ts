@@ -66,3 +66,27 @@ test("diagnostics page renders runtime inspection against the real backend", asy
   await expect(page.getByRole("heading", { name: "Systemd unit state" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Generated artifacts" })).toBeVisible();
 });
+
+test("deploy page exposes host snapshots list and a restore action", async ({ page }) => {
+  if (!backend) throw new Error("Backend server was not initialized");
+
+  // Trigger an apply so a snapshot gets captured.
+  const applyResponse = await page.request.post(`${backend.apiBaseUrl}/api/deploy/execute`, {
+    data: { profile_id: "local-system", execute: true, action: "apply" },
+  });
+  expect(applyResponse.ok()).toBeTruthy();
+
+  await page.goto("/deploy");
+
+  // The deploy page now lists host snapshots.
+  await expect(page.getByRole("heading", { name: "Local host snapshots" })).toBeVisible();
+  const snapshotRows = page.getByTestId("host-snapshot-row");
+  await expect(snapshotRows.first()).toBeVisible();
+  await expect(snapshotRows.first()).toContainText("trigger=apply");
+
+  // Clicking "Restore" without confirmation should NOT mutate the host.
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await snapshotRows.first().getByRole("button", { name: "Restore" }).click();
+  // No `Restored snapshot` banner should appear because we cancelled.
+  await expect(page.getByTestId("restore-banner")).toHaveCount(0);
+});

@@ -99,6 +99,7 @@ npm run test:e2e
 - local deployment execution endpoint that can preview, bundle, apply, and roll back on the same host, with post-apply service-state and network-listener verification
 - local runtime smoke endpoint that probes mediamtx/relay service state, RTMP listener, and TCP reachability of primary/backup/output endpoints
 - hardened systemd service templates (WatchdogSec, LimitNOFILE, MemoryMax, journal output, network-online ordering)
+- pre-apply host snapshots captured automatically under `<runtime_dir>/host-snapshots/<id>/`, plus a `POST /api/deploy/restore-snapshot` endpoint and a `host_restore_snapshot.py` CLI for off-band recovery
 - service-control API with dry-run or execute modes for known runtime services
 - log inspection API via `journalctl`
 - UI controls for apply / stage-install / service actions / log fetch

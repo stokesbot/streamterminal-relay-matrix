@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,9 @@ from .schemas import (
     DeploymentPreflightResponse,
     DeploymentProfile,
     DiagnosticsResponse,
+    HostSnapshotListResponse,
+    HostSnapshotRestoreRequest,
+    HostSnapshotSummary,
     InstallResult,
     RelayConfig,
     RuntimeStatus,
@@ -166,6 +171,59 @@ def deploy_audit(profile_id: str = Query(default="local-system")) -> DeploymentA
         return runtime.deployment_audit(config, profile_id=profile_id, latest_revision=store.latest_revision())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/deploy/host-snapshots", response_model=HostSnapshotListResponse)
+def deploy_host_snapshots() -> HostSnapshotListResponse:
+    """List all pre-apply host snapshots the runtime adapter has captured.
+
+    Each snapshot lives under `<runtime_dir>/host-snapshots/<id>/` with a
+    `manifest.json` and a `files/` mirror of the on-host relay files that
+    were about to be overwritten.
+    """
+    snapshots = [HostSnapshotSummary.model_validate(item) for item in runtime.list_host_snapshots()]
+    return HostSnapshotListResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        snapshots=snapshots,
+    )
+
+
+@app.post("/api/deploy/restore-snapshot")
+def deploy_restore_snapshot(request: HostSnapshotRestoreRequest) -> dict[str, Any]:
+    """Restore a captured host snapshot onto the local host.
+
+    Always uses `sudo -n install` so the operation is auditable and never
+    silently touches files outside the snapshot's recorded host_root.
+    Dry-run mode (execute=False) returns the planned commands without
+    running them.
+    """
+    if not request.execute:
+        # Read-only preview: emit the plan and a list of the files that
+        # would be restored, but do not touch the host.
+        try:
+            manifest = runtime._read_snapshot_manifest(request.snapshot_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "executed": False,
+            "snapshot_id": request.snapshot_id,
+            "host_root": manifest.get("host_root"),
+            "files": manifest.get("files", []),
+        }
+    try:
+        result = runtime.restore_host_snapshot(request.snapshot_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "executed": True,
+        "snapshot_id": result["snapshot_id"],
+        "host_root": result["host_root"],
+        "restored": result["restored"],
+    }
 
 
 @app.post("/api/deploy/execute", response_model=DeployExecuteResponse)
