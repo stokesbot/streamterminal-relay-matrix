@@ -1893,15 +1893,27 @@ class RuntimeAdapter:
                 ),
                 DeploymentCommand(
                     phase="activate",
-                    label=("Enable and start mediamtx" if config.mediamtx_enabled else "Disable and stop mediamtx"),
+                    label=("Enable mediamtx" if config.mediamtx_enabled else "Disable mediamtx"),
                     run_on="local",
-                    command=("sudo systemctl enable --now mediamtx.service" if config.mediamtx_enabled else "sudo systemctl disable --now mediamtx.service"),
+                    command=("sudo systemctl enable mediamtx.service" if config.mediamtx_enabled else "sudo systemctl disable mediamtx.service"),
                 ),
                 DeploymentCommand(
                     phase="activate",
-                    label=("Enable and start stream-failover-relay" if config.relay_enabled else "Disable and stop stream-failover-relay"),
+                    label=("Restart mediamtx" if config.mediamtx_enabled else "Stop mediamtx"),
                     run_on="local",
-                    command=("sudo systemctl enable --now stream-failover-relay.service" if config.relay_enabled else "sudo systemctl disable --now stream-failover-relay.service"),
+                    command=("sudo systemctl restart mediamtx.service" if config.mediamtx_enabled else "sudo systemctl stop mediamtx.service"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label=("Enable stream-failover-relay" if config.relay_enabled else "Disable stream-failover-relay"),
+                    run_on="local",
+                    command=("sudo systemctl enable stream-failover-relay.service" if config.relay_enabled else "sudo systemctl disable stream-failover-relay.service"),
+                ),
+                DeploymentCommand(
+                    phase="activate",
+                    label=("Restart stream-failover-relay" if config.relay_enabled else "Stop stream-failover-relay"),
+                    run_on="local",
+                    command=("sudo systemctl restart stream-failover-relay.service" if config.relay_enabled else "sudo systemctl stop stream-failover-relay.service"),
                 ),
                 DeploymentCommand(
                     phase="verify",
