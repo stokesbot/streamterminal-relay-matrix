@@ -6,6 +6,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchJson,
   sendJson,
+  type BundleInventoryResponse,
+  type BundlePruneResponse,
   type DeployExecuteResponse,
   type DeploymentAudit,
   type DeploymentPlan,
@@ -29,6 +31,7 @@ export default function DeployPage() {
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
   const [audit, setAudit] = useState<DeploymentAudit | null>(null);
   const [snapshots, setSnapshots] = useState<HostSnapshotSummary[]>([]);
+  const [bundles, setBundles] = useState<BundleInventoryResponse | null>(null);
   const [execution, setExecution] = useState<DeployExecuteResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,6 +42,8 @@ export default function DeployPage() {
   const [runningBundle, setRunningBundle] = useState(false);
   const [restoreBanner, setRestoreBanner] = useState<string | null>(null);
   const [runningRestoreId, setRunningRestoreId] = useState<string | null>(null);
+  const [pruneBanner, setPruneBanner] = useState<string | null>(null);
+  const [runningPrune, setRunningPrune] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,12 +57,14 @@ export default function DeployPage() {
           planPayload,
           auditPayload,
           snapshotsPayload,
+          bundlesPayload,
         ] = await Promise.all([
           fetchJson<DeploymentProfile[]>("/api/deploy/profiles"),
           fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
           fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
           fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
           fetchJson<HostSnapshotListResponse>("/api/deploy/host-snapshots"),
+          fetchJson<BundleInventoryResponse>("/api/runtime/bundles"),
         ]);
         if (!cancelled) {
           setProfile(profilesPayload[0] ?? null);
@@ -65,6 +72,7 @@ export default function DeployPage() {
           setPlan(planPayload);
           setAudit(auditPayload);
           setSnapshots(snapshotsPayload.snapshots ?? []);
+          setBundles(bundlesPayload);
           setExecution(null);
           setError(null);
         }
@@ -97,14 +105,46 @@ export default function DeployPage() {
   }, [plan]);
 
   async function refreshDeploymentState() {
-    const [preflightPayload, planPayload, auditPayload] = await Promise.all([
-      fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
-      fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
-      fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
-    ]);
+    const [preflightPayload, planPayload, auditPayload, bundlesPayload, snapshotsPayload] =
+      await Promise.all([
+        fetchJson<DeploymentPreflight>("/api/deploy/preflight?profile_id=local-system"),
+        fetchJson<DeploymentPlan>("/api/deploy/plan?profile_id=local-system"),
+        fetchJson<DeploymentAudit>("/api/deploy/audit?profile_id=local-system"),
+        fetchJson<BundleInventoryResponse>("/api/runtime/bundles"),
+        fetchJson<HostSnapshotListResponse>("/api/deploy/host-snapshots"),
+      ]);
     setPreflight(preflightPayload);
     setPlan(planPayload);
     setAudit(auditPayload);
+    setBundles(bundlesPayload);
+    setSnapshots(snapshotsPayload.snapshots ?? []);
+  }
+
+  async function pruneBundles() {
+    if (typeof window !== "undefined" && !window.confirm(
+      "Prune old apply bundles and staging directories? The most recent apply bundle will be kept regardless of the configured retention.",
+    )) {
+      return;
+    }
+    setRunningPrune(true);
+    setPruneBanner(null);
+    try {
+      const payload = await sendJson<BundlePruneResponse>(
+        "/api/runtime/prune-bundles",
+        "POST",
+        { execute: true },
+      );
+      setPruneBanner(
+        `Pruned ${payload.removed_bundles.length} bundles and ${payload.removed_staging.length} staging dirs (${payload.reclaimed_bytes} bytes reclaimed). ${payload.bundles_after} bundles, ${payload.staging_after} staging dirs remain.`,
+      );
+      await refreshDeploymentState();
+    } catch (err) {
+      setPruneBanner(
+        err instanceof Error ? `Prune failed: ${err.message}` : "Unable to prune bundles.",
+      );
+    } finally {
+      setRunningPrune(false);
+    }
   }
 
   async function runPreflight() {
@@ -139,9 +179,6 @@ export default function DeployPage() {
       });
       setExecution(payload);
       await refreshDeploymentState();
-      // Re-pull the snapshot list because apply/rollback capture a new snapshot.
-      const snapshotList = await fetchJson<HostSnapshotListResponse>("/api/deploy/host-snapshots");
-      setSnapshots(snapshotList.snapshots ?? []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run local deployment action.");
@@ -468,6 +505,82 @@ export default function DeployPage() {
                   </li>
                 ))}
             </ul>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6" data-testid="bundle-inventory-section">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Bundle inventory and rotation</h2>
+              <p className="mt-2 text-sm text-slate-400">
+                Bound the on-disk growth of <code>runtime/deploy-bundles/</code> and
+                <code> runtime/install-root/</code> by retaining the most recent bundles and
+                staging directories. The newest apply bundle is always kept.
+              </p>
+            </div>
+            {pruneBanner ? (
+              <div
+                data-testid="prune-banner"
+                className="rounded-lg border border-emerald-900 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-200"
+              >
+                {pruneBanner}
+              </div>
+            ) : null}
+          </div>
+          {bundles ? (
+            <>
+              <div className="mt-4 grid gap-3 sm:grid-cols-4">
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4" data-testid="bundle-count">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Bundles</div>
+                  <div className="mt-2 text-2xl font-semibold text-slate-100">{bundles.bundle_count}</div>
+                  <div className="mt-1 text-xs text-slate-500">{bundles.bundle_total_bytes} bytes</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Staging dirs</div>
+                  <div className="mt-2 text-2xl font-semibold text-slate-100">{bundles.staging_count}</div>
+                  <div className="mt-1 text-xs text-slate-500">{bundles.staging_total_bytes} bytes</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Bundle root</div>
+                  <div className="mt-2 break-all text-xs text-slate-200">{bundles.bundle_root}</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Staging root</div>
+                  <div className="mt-2 break-all text-xs text-slate-200">{bundles.install_root}</div>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => void pruneBundles()}
+                  disabled={runningPrune || bundles.bundle_count === 0}
+                  className="rounded-lg border border-rose-700 bg-rose-950 px-3 py-2 text-xs font-medium uppercase tracking-[0.2em] text-rose-100 hover:bg-rose-900 disabled:opacity-50"
+                  data-testid="prune-bundles-button"
+                >
+                  {runningPrune ? "Pruning..." : "Prune old bundles"}
+                </button>
+              </div>
+              {bundles.bundles.length > 0 ? (
+                <ul className="mt-4 space-y-2 text-sm text-slate-300" data-testid="bundle-list">
+                  {bundles.bundles.slice(0, 10).map((bundle) => (
+                    <li
+                      key={bundle.name}
+                      className="rounded-lg border border-slate-800 bg-slate-950 p-3"
+                    >
+                      <div className="flex flex-col gap-1 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="font-mono text-xs text-slate-200">{bundle.name}</div>
+                        <div className="text-xs text-slate-500">
+                          mode={bundle.mode ?? "?"} · host_touched={String(bundle.host_touched)} ·{" "}
+                          files={bundle.file_count} · bytes={bundle.size_bytes}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">Loading bundle inventory…</p>
           )}
         </section>
 

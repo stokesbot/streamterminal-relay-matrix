@@ -10,6 +10,9 @@ from .config import get_settings
 from .runtime import RuntimeAdapter
 from .schemas import (
     ApplyResult,
+    BundleInventoryResponse,
+    BundlePruneRequest,
+    BundlePruneResponse,
     DeployExecuteRequest,
     DeployExecuteResponse,
     DeploymentAuditResponse,
@@ -224,6 +227,58 @@ def deploy_restore_snapshot(request: HostSnapshotRestoreRequest) -> dict[str, An
         "host_root": result["host_root"],
         "restored": result["restored"],
     }
+
+
+@app.get("/api/runtime/bundles", response_model=BundleInventoryResponse)
+def runtime_bundles() -> BundleInventoryResponse:
+    """List the local apply bundles and staging dirs and their sizes.
+
+    Useful for the deploy page bundle-pruning panel and for the
+    /api/runtime/prune-bundles operator action.
+    """
+    payload = runtime.bundle_inventory()
+    return BundleInventoryResponse.model_validate(
+        {
+            "generated_at": payload["generated_at"],
+            "bundle_root": payload["bundle_root"],
+            "install_root": payload["install_root"],
+            "bundle_count": payload["bundle_count"],
+            "bundle_total_bytes": payload["bundle_total_bytes"],
+            "staging_count": payload["staging_count"],
+            "staging_total_bytes": payload["staging_total_bytes"],
+            "bundles": [
+                {
+                    "name": item["name"],
+                    "path": item["path"],
+                    "size_bytes": item["size_bytes"],
+                    "file_count": item["file_count"],
+                    "modified_at": item["modified_at"],
+                    "mtime": item["mtime"],
+                    "host_touched": item.get("host_touched", False),
+                    "mode": item.get("mode"),
+                }
+                for item in payload["bundles"]
+            ],
+        }
+    )
+
+
+@app.post("/api/runtime/prune-bundles", response_model=BundlePruneResponse)
+def runtime_prune_bundles(request: BundlePruneRequest) -> BundlePruneResponse:
+    """Prune old apply bundles and staging directories.
+
+    Bounded by `STM_BUNDLE_KEEP_APPLY` (default 20) and
+    `STM_BUNDLE_KEEP_STAGE` (default 5) env vars on the backend.
+    Always keeps the most recent bundle, even with keep_apply=0.
+    With `execute=False` returns what would be removed without
+    deleting anything.
+    """
+    payload = runtime.prune_bundles(
+        keep_apply=request.keep_apply,
+        keep_stage=request.keep_stage,
+        dry_run=not request.execute,
+    )
+    return BundlePruneResponse.model_validate(payload)
 
 
 @app.post("/api/deploy/execute", response_model=DeployExecuteResponse)

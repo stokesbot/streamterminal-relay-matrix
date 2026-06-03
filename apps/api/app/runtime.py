@@ -1187,6 +1187,187 @@ class RuntimeAdapter:
             "restored": restored,
         }
 
+    # ----- Bundle rotation / inventory -----
+    # `apps/api/data/runtime/deploy-bundles/` and `apps/api/data/runtime/install-root/`
+    # grow on every apply. We bound that growth with two retention knobs:
+    #   STM_BUNDLE_KEEP_APPLY: how many apply bundles to keep (default 20)
+    #   STM_BUNDLE_KEEP_STAGE: how many staging dirs to keep (default 5)
+    # Rotation never deletes the most recent bundle, even if keep=0, so
+    # there's always at least one rollback source available.
+
+    @staticmethod
+    def _default_keep_apply() -> int:
+        raw = os.environ.get("STM_BUNDLE_KEEP_APPLY", "20")
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 20
+
+    @staticmethod
+    def _default_keep_stage() -> int:
+        raw = os.environ.get("STM_BUNDLE_KEEP_STAGE", "5")
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 5
+
+    @staticmethod
+    def _dir_size_and_count(path: Path) -> tuple[int, int]:
+        size = 0
+        count = 0
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                try:
+                    size += entry.stat().st_size
+                    count += 1
+                except OSError:  # pragma: no cover - rare fs errors
+                    continue
+        return size, count
+
+    def _safe_rmtree(self, path: Path) -> int:
+        """Delete `path` and return the total bytes reclaimed.
+
+        Refuses to delete anything outside `self.runtime_dir`.
+        """
+        if not path.exists():
+            return 0
+        try:
+            path.resolve().relative_to(self.runtime_dir.resolve())
+        except ValueError:
+            return 0
+        size, _count = self._dir_size_and_count(path)
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+        return size
+
+    def list_bundles(self, *, profile_id: str | None = None) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        if not self.bundle_root.exists():
+            return items
+        pattern = f"*-{profile_id}" if profile_id else "*"
+        for bundle_dir in self.bundle_root.glob(pattern):
+            if not bundle_dir.is_dir():
+                continue
+            stat = bundle_dir.stat()
+            size, count = self._dir_size_and_count(bundle_dir)
+            manifest_path = self._bundle_manifest_path(bundle_dir)
+            host_touched = False
+            mode: str | None = None
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                    host_touched = bool(manifest.get("host_touched"))
+                    mode = manifest.get("mode")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            items.append(
+                {
+                    "name": bundle_dir.name,
+                    "path": str(bundle_dir),
+                    "size_bytes": size,
+                    "file_count": count,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                    "mtime": stat.st_mtime,
+                    "host_touched": host_touched,
+                    "mode": mode,
+                }
+            )
+        items.sort(key=lambda item: item["mtime"], reverse=True)
+        return items
+
+    def list_staging_dirs(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        if not self.install_root.exists():
+            return items
+        for entry in self.install_root.iterdir():
+            if not entry.is_dir():
+                continue
+            # Skip the protected subdirs we use for stage staging.
+            if entry.name in {"deploy-bundles", "host-snapshots"}:
+                continue
+            stat = entry.stat()
+            size, count = self._dir_size_and_count(entry)
+            items.append(
+                {
+                    "name": entry.name,
+                    "path": str(entry),
+                    "size_bytes": size,
+                    "file_count": count,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                    "mtime": stat.st_mtime,
+                }
+            )
+        items.sort(key=lambda item: item["mtime"], reverse=True)
+        return items
+
+    def prune_bundles(
+        self,
+        *,
+        keep_apply: int | None = None,
+        keep_stage: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        keep_apply_value = self._default_keep_apply() if keep_apply is None else max(0, int(keep_apply))
+        keep_stage_value = self._default_keep_stage() if keep_stage is None else max(0, int(keep_stage))
+
+        bundles = self.list_bundles()
+        staging = self.list_staging_dirs()
+
+        # Sort by mtime ascending so we delete the oldest first.
+        bundles_asc = sorted(bundles, key=lambda item: item["mtime"])
+        staging_asc = sorted(staging, key=lambda item: item["mtime"])
+
+        # Determine what to remove: skip the most recent `keep_apply` bundles.
+        # If `keep_apply` is 0, we still keep the most recent bundle.
+        apply_keep_count = max(1, keep_apply_value) if keep_apply_value == 0 else keep_apply_value
+        apply_to_remove = bundles_asc[: max(0, len(bundles_asc) - apply_keep_count)]
+        stage_to_remove = staging_asc[: max(0, len(staging_asc) - keep_stage_value)]
+
+        removed_bundles: list[dict[str, Any]] = []
+        removed_staging: list[dict[str, Any]] = []
+        reclaimed_bytes = 0
+        for item in apply_to_remove:
+            if not dry_run:
+                reclaimed_bytes += self._safe_rmtree(Path(item["path"]))
+            removed_bundles.append({"path": item["path"], "size_bytes": item["size_bytes"]})
+        for item in stage_to_remove:
+            if not dry_run:
+                reclaimed_bytes += self._safe_rmtree(Path(item["path"]))
+            removed_staging.append({"path": item["path"], "size_bytes": item["size_bytes"]})
+
+        bundles_after = len(bundles_asc) - (0 if dry_run else len(apply_to_remove))
+        staging_after = len(staging_asc) - (0 if dry_run else len(stage_to_remove))
+
+        return {
+            "ok": True,
+            "executed": not dry_run,
+            "keep_apply": keep_apply_value,
+            "keep_stage": keep_stage_value,
+            "bundles_before": len(bundles_asc),
+            "staging_before": len(staging_asc),
+            "removed_bundles": removed_bundles,
+            "removed_staging": removed_staging,
+            "bundles_after": bundles_after,
+            "staging_after": staging_after,
+            "reclaimed_bytes": reclaimed_bytes,
+            "last_pruned_at": datetime.now(UTC).isoformat(),
+        }
+
+    def bundle_inventory(self) -> dict[str, Any]:
+        bundles = self.list_bundles()
+        staging = self.list_staging_dirs()
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "bundle_root": str(self.bundle_root),
+            "install_root": str(self.install_root),
+            "bundle_count": len(bundles),
+            "bundle_total_bytes": sum(item["size_bytes"] for item in bundles),
+            "staging_count": len(staging),
+            "staging_total_bytes": sum(item["size_bytes"] for item in staging),
+            "bundles": bundles,
+            "staging": staging,
+        }
+
     def _apply_bundle_to_host(
         self,
         plan: DeploymentPlanResponse,
