@@ -86,7 +86,6 @@ curl -sS http://127.0.0.1:8000/api/runtime/smoke | jq '.summary'
 The unit files are hardened:
 - `After=network-online.target` + `Wants=network-online.target`
 - `Restart=always` / `RestartSec=2`
-- `WatchdogSec=60` on mediamtx (kills a stuck process after 60s)
 - `LimitNOFILE=65536` on both
 - `MemoryMax=512M` on the relay
 - `StandardOutput=journal` / `StandardError=journal`
@@ -152,9 +151,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/runtime/smoke
    - `sudo cp /usr/local/bin/stream-failover-relay{.broken,}` (or use the bundle)
    - reinstall via the UI by clicking **Apply draft** again
 
-The relay is configured to restart on failure with `RestartSec=2`. The
-host-side `WatchdogSec=60` on mediamtx kills a stuck process and lets
-systemd restart it.
+The relay is configured to restart on failure with `RestartSec=2`.
 
 ---
 

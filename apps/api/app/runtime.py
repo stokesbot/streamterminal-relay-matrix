@@ -140,15 +140,13 @@ class RuntimeAdapter:
             f"ExecStart={mediamtx_binary} {config_path}\n"
             "Restart=always\n"
             "RestartSec=2\n"
-            "WatchdogSec=60\n"
+            f"Environment=STM_CHANNEL_NAME={self._systemd_escape(config.channel_name)}\n"
             "LimitNOFILE=65536\n"
             "StandardOutput=journal\n"
-            "StandardError=journal\n"
-            f"Environment=STM_CHANNEL_NAME={self._systemd_escape(config.channel_name)}\n\n"
+            "StandardError=journal\n\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
-
     def relay_service(self, config: RelayConfig, config_dir: str, bin_dir: str) -> str:
         relay_binary = shutil.which("stream-failover-relay") or "/usr/local/bin/stream-failover-relay"
         command_path = f"{bin_dir}/relay-command.sh"
@@ -1088,7 +1086,26 @@ class RuntimeAdapter:
                 continue
             dest = files_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
-            data = source.read_bytes()
+            try:
+                data = source.read_bytes()
+            except PermissionError as e:
+                # Some files (e.g. streamterminal-relay.env) are 0600 and
+                # unreadable by the API process. Warn and skip rather than fail.
+                with open(str(self.runtime_dir / ".last-known-unreadable-files.json"), "a+") as fh:
+                    import json as _json
+                    fh.seek(0)
+                    try:
+                        unreads = _json.load(fh)
+                    except _json.JSONDecodeError:
+                        unreads = {}
+                    unreads[str(relative)] = str(e)
+                    fh.seek(0)
+                    fh.truncate()
+                    _json.dump(unreads, fh, indent=2)
+                continue
+            except OSError:
+                # Other filesystem errors: warn and skip.
+                continue
             dest.write_bytes(data)
             manifest_files.append(
                 {

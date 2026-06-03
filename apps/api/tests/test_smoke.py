@@ -335,7 +335,6 @@ class SmokeLoopTests(unittest.TestCase):
         for directive in [
             "Restart=always",
             "RestartSec=",
-            "WatchdogSec=60",
             "LimitNOFILE=65536",
             "After=network-online.target",
             "Wants=network-online.target",
