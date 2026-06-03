@@ -119,11 +119,17 @@ Deliverables:
 - multiple pipelines in one UI
 - grouped service management
 - per-channel event history
+- preferred runtime shape: shared MediaMTX instance with one relay process per channel
+- preferred service model: `streamterminal-relay@.service` template with per-channel instances
+- preferred initial storage model: one `multi-channel-config.json` plus revision history
+- preserve `/api/config*` as a compatibility path for a default channel during migration
 
 ### Richer protocol support
 - RTMP + SRT mixed workflows
 - listener/caller mode controls
 - destination presets
+- expose SRT-specific controls cleanly in the config UI (`latency`, `passphrase`, `pbkeylen`, `maxbw`, `stream_id`)
+- add SRT-specific preflight guidance for listener ports, encryption, and mixed-protocol failover paths
 
 ### Smart validation
 - codec/fps/resolution compatibility checks
@@ -156,3 +162,21 @@ Deliverables:
 5. integrate runtime control
 6. test locally
 7. only then move to staging/production server
+
+---
+
+## Confirmed post-MVP exploration notes
+
+These are not current `develop` scope items, but they are worth preserving as planning guidance.
+
+### Multi-channel implementation notes
+- target 2-10 independently managed channels per instance
+- each channel should have its own primary input, backup input, output, enable flag, and auto-restart setting
+- favor a single-file config model over per-channel files for the first multi-channel release to simplify migration and backup
+- keep the runtime local-first: shared MediaMTX plus separately managed relay instances per channel
+
+### SRT follow-up notes
+- single-channel SRT support can land before any multi-channel work
+- configuration UX should clearly distinguish caller vs listener mode
+- operator docs should include tested examples for listener ingest, caller ingest, encrypted SRT, and mixed RTMP/SRT failover
+- future diagnostics should include SRT-specific troubleshooting hints around passphrase mismatch, port exposure, and latency tuning

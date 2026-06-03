@@ -21,7 +21,7 @@ Build a local-first operator console for a single failover pipeline:
 - primary input URL
 - backup input URL
 - output URL
-- protocol selection and basic endpoint options
+- protocol selection and basic endpoint options, including RTMP/SRT and caller/listener where applicable
 - simple runtime options (enabled/disabled, auto-restart)
 
 ### Runtime control
@@ -42,6 +42,7 @@ Build a local-first operator console for a single failover pipeline:
 ### Validation
 - URL/protocol validation
 - required field validation
+- SRT-specific validation for mode, latency, and encryption inputs when SRT is selected
 - basic compatibility warnings model
 - pre-apply safety checks
 
