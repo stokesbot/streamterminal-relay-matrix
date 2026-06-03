@@ -15,6 +15,7 @@ __pycache__/
 # Runtime/generated state
 apps/api/data/revisions.json
 apps/api/data/runtime/
+apps/api/data/multi-channel-config.json
 
 # OS
 .DS_Store
