@@ -319,11 +319,17 @@ def runtime_status() -> RuntimeStatus:
     relay_tool = host["tools"]["stream-failover-relay"]
     status_detail = f"Draft applied in revision {latest_revision.version}" if latest_revision else "No applied revision yet"
 
+    # Probe actual stream state from relay logs (config-aware for custom paths)
+    probe = runtime.probe_stream_state(config, lines=80)
+
     return RuntimeStatus(
-        active_source="primary",
-        primary_state="healthy" if config.primary_input.enabled else "down",
-        backup_state="healthy" if config.backup_input.enabled else "down",
-        output_state="connected" if config.output.enabled else "disconnected",
+        active_source=probe["active_source"],
+        primary_state="healthy" if probe["active_source"] == "primary" else ("down" if probe["probe_success"] else "unknown"),
+        backup_state="healthy" if probe["active_source"] == "backup" else ("down" if probe["probe_success"] else "unknown"),
+        output_state="connected" if probe["output_bytes"] > 0 else ("disconnected" if probe["probe_success"] else "unknown"),
+        primary_bytes=probe["primary_bytes"],
+        backup_bytes=probe["backup_bytes"],
+        output_bytes=probe["output_bytes"],
         services=[
             ServiceStatus(
                 name="mediamtx",
@@ -337,6 +343,8 @@ def runtime_status() -> RuntimeStatus:
             ),
         ],
         recent_events=[
+            f"Stream probe: {probe['probe_method']} (success={probe['probe_success']}, active={probe['active_source']})",
+            f"Primary: {probe['primary_bytes']} bytes, Backup: {probe['backup_bytes']} bytes, Output: {probe['output_bytes']} bytes",
             "Prototype scaffold online",
             "Draft/apply/rollback path now generates runtime artifacts locally",
             "Host diagnostics now probe local runtime binaries and command availability",
@@ -345,6 +353,8 @@ def runtime_status() -> RuntimeStatus:
             "Safe local bundle execution writes env-template-aware bundles without touching other machines",
             "Deployment audit compares file checksums against the latest local bundle",
         ],
+        probe_method=probe["probe_method"],
+        probe_success=probe["probe_success"],
     )
 
 

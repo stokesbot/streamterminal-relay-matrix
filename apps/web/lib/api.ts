@@ -33,8 +33,13 @@ export type RuntimeStatus = {
   primary_state: string;
   backup_state: string;
   output_state: string;
+  primary_bytes: number;
+  backup_bytes: number;
+  output_bytes: number;
   services: Array<{ name: string; status: string; detail: string }>;
   recent_events: string[];
+  probe_method: string;
+  probe_success: boolean;
 };
 
 export type ValidationResult = {

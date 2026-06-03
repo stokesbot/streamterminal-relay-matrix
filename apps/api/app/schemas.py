@@ -50,13 +50,28 @@ class ServiceStatus(BaseModel):
     detail: str
 
 
+class StreamProbeState(BaseModel):
+    name: str
+    path: str
+    publisher_connected: bool = False
+    publisher_bytes_rxd: int = 0
+    publisher_bytes_txd: int = 0
+    readers_connected: int = 0
+    error_hint: str | None = None
+
+
 class RuntimeStatus(BaseModel):
     active_source: Literal["primary", "backup", "unknown"] = "unknown"
     primary_state: Literal["healthy", "down", "unknown"] = "unknown"
     backup_state: Literal["healthy", "down", "unknown"] = "unknown"
     output_state: Literal["connected", "disconnected", "unknown"] = "unknown"
+    primary_bytes: int = 0
+    backup_bytes: int = 0
+    output_bytes: int = 0
     services: list[ServiceStatus]
     recent_events: list[str] = Field(default_factory=list)
+    probe_method: Literal["mediamtx_api", "relay_logs", "config_only"] = "config_only"
+    probe_success: bool = False
 
 
 class ConfigRevision(BaseModel):

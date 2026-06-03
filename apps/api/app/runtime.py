@@ -736,6 +736,149 @@ class RuntimeAdapter:
             "detail": "journalctl query executed",
         }
 
+    def probe_stream_state(self, config: RelayConfig | None = None, lines: int = 50) -> dict[str, Any]:
+        """Probe actual stream state by parsing relay journal logs.
+
+        Extracts:
+            - active_source: which input is currently marked :current
+            - primary_bytes: total bytes read from primary (frozen when primary dies)
+            - backup_bytes: total bytes read from backup (still increasing when active)
+            - output_bytes: total bytes forwarded to output (always increasing if relay is running)
+            - probe_method: 'relay_logs'
+            - probe_success: True if we could parse journal output
+        """
+        import re
+        import shutil
+
+        # Derive path names from configured URLs, or use defaults
+        if config:
+            primary_path = self._path_name(config.primary_input, "main")
+            backup_path = self._path_name(config.backup_input, "backup")
+            output_path = self._path_name(config.output, "output")
+            # For regex matching in InputWithFallback lines, use the last segment
+            # (the actual URL may have paths like "live/main" or "stream_a")
+            primary_url_seg = primary_path.split("/")[-1]
+            backup_url_seg = backup_path.split("/")[-1]
+        else:
+            primary_path = "main"
+            backup_path = "backup"
+            output_path = "output"
+            primary_url_seg = primary_path
+            backup_url_seg = backup_path
+
+        # Relay log prefixes are ALWAYS "input main:" and "input fallback:"
+        # regardless of URL path. Use fixed names for byte matching.
+        primary_log = "main"
+        backup_log = "fallback"
+
+        journalctl = shutil.which("journalctl")
+        if not journalctl:
+            return {
+                "active_source": "unknown",
+                "primary_bytes": 0,
+                "backup_bytes": 0,
+                "output_bytes": 0,
+                "probe_method": "relay_logs",
+                "probe_success": False,
+                "error_hint": "journalctl not available on host",
+            }
+        unit_name = self.SERVICE_UNIT_MAP.get("stream-failover-relay")
+        command = ["sudo", "-n", journalctl, "-u", unit_name, "-n", str(lines), "--no-pager", "-o", "cat"]
+        result = self._run_command(command)
+        output = result.get("stdout") or ""
+        if not output.strip():
+            return {
+                "active_source": "unknown",
+                "primary_bytes": 0,
+                "backup_bytes": 0,
+                "output_bytes": 0,
+                "probe_method": "relay_logs",
+                "probe_success": False,
+                "error_hint": "empty journal output",
+            }
+
+        active_source = "unknown"
+        primary_bytes = 0
+        backup_bytes = 0
+        output_bytes = 0
+        error_hint = None
+
+        # Build regex patterns from configured paths
+        primary_pattern = re.escape(primary_url_seg)
+        backup_pattern = re.escape(backup_url_seg)
+
+        # Active source: look for the most recent "inputs: InputWithFallback(...)"
+        # When primary is active: InputChain(Input(rtmp://.../live/main):active):current
+        # When backup is active: InputChain(<unable to lock>; .../live/main), InputChain(.../live/backup):current
+        for line in reversed(output.splitlines()):
+            if "inputs: InputWithFallback" in line:
+                # Check for :active on the inner InputChain first
+                # Match any path, not just hardcoded ones
+                m = re.search(rf'Input\(rtmp://[^)]+/(?:{primary_pattern}|{backup_pattern})\/?\):active', line)
+                if m:
+                    # Determine which path matched by checking backreferences
+                    matched = m.group(0)
+                    if primary_url_seg in matched:
+                        active_source = "primary"
+                    elif backup_url_seg in matched:
+                        active_source = "backup"
+                    break
+                # Fallback: check for :current at the end (backup in fallback mode)
+                m = re.search(rf'/(?:{primary_pattern}|{backup_pattern})\):current', line)
+                if m:
+                    matched = m.group(0)
+                    if primary_url_seg in matched:
+                        active_source = "primary"
+                    elif backup_url_seg in matched:
+                        active_source = "backup"
+                    break
+                break
+
+        # Bytes: look for lines matching configured path names
+        # input main: {...} or input fallback: {...}
+        # output:{...} (output path not typically in relay logs; "output" is fixed)
+        latest_input_primary = 0
+        latest_input_backup = 0
+        latest_output = 0
+        # Use fixed log prefixes for byte matching (relay always says "input main:")
+        primary_byte_pattern = re.escape(primary_log)
+        backup_byte_pattern = re.escape(backup_log)
+        for line in output.splitlines():
+            stripped = line.lstrip()
+            # Match input lines with configured path names
+            # e.g., "input main:", "input fallback:", "input custom_feed:"
+            if re.search(rf'input\s+(?:{primary_byte_pattern}|{backup_byte_pattern}):', stripped):
+                # Determine which path this line is for
+                # e.g., "input main:" or "input fallback:"
+                m_bytes = re.search(r'"Bytes":\s*(\d+)', stripped)
+                if m_bytes:
+                    bytes_val = int(m_bytes.group(1))
+                    if primary_log in stripped:
+                        latest_input_primary = bytes_val
+                    elif backup_log in stripped:
+                        latest_input_backup = bytes_val
+            # Output lines are always just "output:" in the relay
+            elif stripped.startswith('output:') or stripped.startswith('"output":'):
+                ms = re.findall(r'"Bytes":\s*(\d+)', stripped)
+                if ms:
+                    total = sum(int(b) for b in ms)
+                    if total > latest_output:
+                        latest_output = total
+
+        primary_bytes = latest_input_primary
+        backup_bytes = latest_input_backup
+        output_bytes = latest_output
+
+        return {
+            "active_source": active_source,
+            "primary_bytes": primary_bytes,
+            "backup_bytes": backup_bytes,
+            "output_bytes": output_bytes,
+            "probe_method": "relay_logs",
+            "probe_success": active_source != "unknown" or output_bytes > 0,
+            "error_hint": error_hint,
+        }
+
     CRASH_LOOP_RESTART_THRESHOLD = 3
 
     def runtime_smoke(self, config: RelayConfig) -> dict[str, Any]:

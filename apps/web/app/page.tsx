@@ -260,6 +260,28 @@ export default function Home() {
           <StatusPill label="Output" value={state.runtime?.output_state ?? "unknown"} />
         </section>
 
+        {(state.runtime?.probe_success) ? (
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+            <div className="flex items-center justify-between">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                Stream probe ({state.runtime.probe_method})
+              </div>
+              <div className="text-xs text-slate-500">
+                {state.runtime.primary_bytes.toLocaleString()} B primary / {state.runtime.backup_bytes.toLocaleString()} B backup / {state.runtime.output_bytes.toLocaleString()} B output
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section className="rounded-xl border border-amber-900/30 bg-amber-950/20 p-4">
+            <div className="text-xs uppercase tracking-[0.2em] text-amber-400">
+              Stream probe unavailable
+            </div>
+            <div className="mt-1 text-xs text-amber-500">
+              Journal logs not accessible or relay not publishing stream data.
+            </div>
+          </section>
+        )}
+
         <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
             <div className="flex items-center justify-between gap-4">
