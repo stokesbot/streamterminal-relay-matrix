@@ -1,18 +1,30 @@
 #!/bin/bash
 # Comprehensive UI/API Test Script for StreamTerminal Relay Matrix
-# Tests all major endpoints and UI functionality on VPS 46.225.116.163
+# Tests all major endpoints and UI functionality
+#
+# Usage: ./test-vps-ui.sh [HOST] [API_PORT] [WEB_PORT]
+#   HOST      defaults to localhost
+#   API_PORT  defaults to 8000
+#   WEB_PORT  defaults to 3000
+#
+# Examples:
+#   ./test-vps-ui.sh                         # test localhost:8000 / :3000
+#   ./test-vps-ui.sh 192.168.1.50            # test 192.168.1.50:8000 / :3000
+#   ./test-vps-ui.sh mybox 8080 3001         # test mybox:8080 / :3001
 
 set -e
 
-VPS_IP="46.225.116.163"
-API_PORT="8000"
-WEB_PORT="3000"
-API_BASE="http://${VPS_IP}:${API_PORT}"
-WEB_BASE="http://${VPS_IP}:${WEB_PORT}"
+TARGET="${1:-localhost}"
+API_PORT="${2:-8000}"
+WEB_PORT="${3:-3000}"
+API_BASE="http://${TARGET}:${API_PORT}"
+WEB_BASE="http://${TARGET}:${WEB_PORT}"
 
 echo "=========================================="
-echo "StreamTerminal Relay Matrix - VPS UI Test"
-echo "VPS: ${VPS_IP}"
+echo "StreamTerminal Relay Matrix - UI/API Test"
+echo "Target: ${TARGET}"
+echo "API:    ${API_BASE}"
+echo "Web:    ${WEB_BASE}"
 echo "=========================================="
 echo ""
 

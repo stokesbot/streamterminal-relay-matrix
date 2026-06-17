@@ -1,6 +1,10 @@
 #!/bin/bash
-# VPS Diagnostic Report for StreamTerminal Relay Matrix
-# Run this script ON THE VPS (46.225.116.163) to generate a comprehensive diagnostic report
+# StreamTerminal Relay Matrix - Diagnostic Report
+# Run this script on the target host to generate a comprehensive diagnostic report
+#
+# Usage: ./vps-diagnostic-report.sh [API_PORT] [WEB_PORT]
+#   API_PORT  defaults to 8000
+#   WEB_PORT  defaults to 3000
 
 echo "=========================================="
 echo "StreamTerminal Relay Matrix - Diagnostic Report"
